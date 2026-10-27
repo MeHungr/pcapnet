@@ -11,7 +11,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 )
 
-// Dial establishes a TCP connection to the configured virtual peer.
+// Dial establishes a TCP connection to a virtual peer in the configured subnet.
 //
 // The returned connection implements net.Conn and is automatically
 // closed when the VirtualStack is closed.
@@ -43,12 +43,12 @@ func (v *VirtualStack) Dial(
 		return nil, fmt.Errorf("invalid target IP: %w", err)
 	}
 
-	// Ensure the destination matches the configured peer.
-	if ip != v.config.PeerVirtualIP {
+	// Restrict destinations to the permitted remote subnet.
+	if !validVirtualIP(ip) || ip == v.config.VirtualIP || !v.config.PeerSubnet.Contains(ip) {
 		return nil, fmt.Errorf(
-			"target %s does not match configured peer %s",
+			"target %s is outside configured peer subnet %s",
 			ip,
-			v.config.PeerVirtualIP,
+			v.config.PeerSubnet,
 		)
 	}
 

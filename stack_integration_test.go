@@ -25,9 +25,9 @@ func TestVirtualStacksTCPEcho(t *testing.T) {
 
 	// Create the control host's in-memory TCP/IP stack.
 	control, err := NewVirtualStackWithTransport(Config{
-		VirtualIP:     netip.MustParseAddr("10.200.0.1"),
-		PeerVirtualIP: netip.MustParseAddr("10.200.0.2"),
-		MTU:           1200,
+		VirtualIP:  netip.MustParseAddr("10.200.0.1"),
+		PeerSubnet: netip.MustParsePrefix("10.200.0.2/32"),
+		MTU:        1200,
 	}, controlTransport)
 	if err != nil {
 		_ = controlTransport.Close()
@@ -38,9 +38,9 @@ func TestVirtualStacksTCPEcho(t *testing.T) {
 
 	// Create the target host's in-memory TCP/IP stack.
 	target, err := NewVirtualStackWithTransport(Config{
-		VirtualIP:     netip.MustParseAddr("10.200.0.2"),
-		PeerVirtualIP: netip.MustParseAddr("10.200.0.1"),
-		MTU:           1200,
+		VirtualIP:  netip.MustParseAddr("10.200.0.2"),
+		PeerSubnet: netip.MustParsePrefix("10.200.0.1/32"),
+		MTU:        1200,
 	}, targetTransport)
 	if err != nil {
 		_ = targetTransport.Close()

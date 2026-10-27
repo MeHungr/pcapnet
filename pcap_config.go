@@ -30,7 +30,7 @@ type PCAPConfig struct {
 	ReserveUDPPort bool
 
 	// Peer is the physical IPv4 address and nonzero UDP port of the peer.
-	// It is independent of Config.PeerVirtualIP.
+	// It is independent of Config.PeerSubnet.
 	Peer netip.AddrPort
 
 	// MTU is the maximum inner IPv4 packet size, including its IP header.

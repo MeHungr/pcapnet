@@ -8,6 +8,9 @@ import (
 	"net/netip"
 	"os"
 	"time"
+
+	"github.com/MeHungr/pcapnet/internal/deadline"
+	"github.com/MeHungr/pcapnet/internal/queue"
 )
 
 // failed initiates shutdown outside a capture or application operation, which
@@ -38,6 +41,8 @@ func (c *UDPConn) Close() error {
 		c.mu.Unlock()
 		c.active.Wait()
 		c.workers.Wait()
+		queue.Drain(c.inbox)
+		clear(c.macs)
 		err := c.resources.Close()
 		c.mu.Lock()
 		c.err = errors.Join(c.err, err)
@@ -91,54 +96,18 @@ func (c *UDPConn) operation(write bool) (context.Context, func(), error) {
 		c.mu.Unlock()
 		return nil, nil, net.ErrClosed
 	}
-	deadline := c.readDeadline
-	if write {
-		deadline = c.writeDeadline
-	}
 	c.active.Add(1)
 	c.mu.Unlock()
-	ctx, cancel := context.WithCancelCause(c.ctx)
-	if !deadline.IsZero() && !time.Now().Before(deadline) {
-		cancel(os.ErrDeadlineExceeded)
-	}
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		for {
-			c.mu.Lock()
-			deadline := c.readDeadline
-			if write {
-				deadline = c.writeDeadline
-			}
-			changed := c.changed
-			c.mu.Unlock()
-			var timer *time.Timer
-			var timeout <-chan time.Time
-			if !deadline.IsZero() {
-				if !time.Now().Before(deadline) {
-					cancel(os.ErrDeadlineExceeded)
-					return
-				}
-				timer = time.NewTimer(time.Until(deadline))
-				timeout = timer.C
-			}
-			select {
-			case <-ctx.Done():
-				if timer != nil {
-					timer.Stop()
-				}
-				return
-			case <-changed:
-				if timer != nil {
-					timer.Stop()
-				}
-			case <-timeout:
-				// Re-read after any concurrent deadline change before expiring.
-				continue
-			}
+	ctx, finish := deadline.Context(c.ctx, func() (time.Time, <-chan struct{}) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		at := c.readDeadline
+		if write {
+			at = c.writeDeadline
 		}
-	}()
-	return ctx, func() { cancel(nil); <-finished; c.active.Done() }, nil
+		return at, c.changed
+	})
+	return ctx, func() { finish(); c.active.Done() }, nil
 }
 
 func (c *UDPConn) opError(op string, err error) error {
@@ -152,6 +121,7 @@ func udpContextError(ctx context.Context) error {
 }
 
 // ReadFrom consumes one datagram, truncating and discarding any unread tail.
+// A configured MagicHeader has already been matched and removed from the body.
 func (c *UDPConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	ctx, finish, err := c.operation(false)
 	if err != nil {
@@ -173,6 +143,7 @@ func (c *UDPConn) ReadFrom(b []byte) (int, net.Addr, error) {
 func (c *UDPConn) Read(b []byte) (int, error) { n, _, err := c.ReadFrom(b); return n, err }
 
 // Write sends one datagram to the dialed peer. Listeners must use WriteTo.
+// MagicHeader is prepended when configured; the returned count excludes it.
 func (c *UDPConn) Write(b []byte) (int, error) {
 	if !c.peer.IsValid() {
 		return 0, c.opError("write", fmt.Errorf("UDP endpoint is not connected"))
@@ -182,6 +153,7 @@ func (c *UDPConn) Write(b []byte) (int, error) {
 
 // WriteTo sends one datagram from a listener to a unicast IPv4 *net.UDPAddr.
 // Connected endpoints use Write and reject WriteTo, matching net.UDPConn.
+// MagicHeader is prepended when configured; the returned count excludes it.
 func (c *UDPConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	if c.peer.IsValid() {
 		return 0, c.opError("write", fmt.Errorf("WriteTo on connected UDP endpoint"))
@@ -199,3 +171,10 @@ func (c *UDPConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 
 var _ net.Conn = (*UDPConn)(nil)
 var _ net.PacketConn = (*UDPConn)(nil)
+
+// MaxDatagramSize is the largest application body that fits the configured
+// physical IPv4 MTU after UDP and the optional magic header. Writes exceeding
+// this limit return ErrDatagramTooLarge without closing the connection.
+func (c *UDPConn) MaxDatagramSize() int {
+	return int(c.config.MTU) - 28 - len(c.config.MagicHeader)
+}

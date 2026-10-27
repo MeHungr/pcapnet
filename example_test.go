@@ -20,8 +20,8 @@ func ExampleNewVirtualStackWithTransport() {
 		MTU:       1200, ReserveUDPPort: false,
 	}
 	virtual := pcapnet.Config{
-		VirtualIP:     netip.MustParseAddr("10.200.0.1"),
-		PeerVirtualIP: netip.MustParseAddr("10.200.0.2"), MTU: 1200,
+		VirtualIP:  netip.MustParseAddr("10.200.0.1"),
+		PeerSubnet: netip.MustParsePrefix("10.200.0.2/32"), MTU: 1200,
 	}
 	transport, err := pcapnet.NewPCAPTransport(ctx, physical)
 	if err != nil {

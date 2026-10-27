@@ -1,6 +1,7 @@
 package pcapnet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ type UDPConfig struct {
 	LocalPort      uint16     // Explicit nonzero UDP port; ephemeral allocation is not provided
 	ReserveUDPPort bool       // Optional host socket reservation, default false
 	MTU            uint32     // Physical IPv4 MTU cap; zero uses the interface MTU
+	MagicHeader    []byte     // Optional payload prefix: prepend on write, match and strip on read
 }
 
 // udpSetupOps supplies endpoint setup and per-destination routing operations.
@@ -83,6 +85,9 @@ type udpMAC struct {
 // Each write sends one datagram; each read consumes one datagram, discarding any
 // tail that does not fit the caller's buffer. Empty datagrams are supported.
 // The receive queue holds 256 datagrams and drops new arrivals when full.
+// With UDPConfig.MagicHeader, application bytes exclude that header; only
+// datagrams carrying the configured prefix are delivered. This is framing, not
+// authentication or a handshake. The connection copies the header during setup.
 type UDPConn struct {
 	resources *pcapResources // Physical capture and optional reservation ownership
 	config    UDPConfig
@@ -160,6 +165,12 @@ func newUDPConn(ctx context.Context, cfg UDPConfig, peer netip.AddrPort, ops udp
 	if cfg.MTU < 28 || cfg.MTU > 65535 || cfg.MTU > uint32(iface.MTU) {
 		return nil, fmt.Errorf("UDP MTU must fit the physical interface and be between 28 and 65535")
 	}
+	if len(cfg.MagicHeader) > int(cfg.MTU)-28 {
+		return nil, fmt.Errorf("UDP magic header exceeds the available payload MTU")
+	}
+	// Capture and writes use an immutable private header, independent of the
+	// caller's configuration slice. Empty headers preserve ordinary UDP behavior.
+	cfg.MagicHeader = bytes.Clone(cfg.MagicHeader)
 	devices, err := ops.findDevices()
 	if err != nil {
 		return nil, fmt.Errorf("enumerate UDP capture devices: %w", err)
@@ -258,6 +269,12 @@ func (c *UDPConn) capture() {
 		if packet.ipLength > int(c.config.MTU) {
 			continue
 		}
+		if !bytes.HasPrefix(packet.Payload, c.config.MagicHeader) {
+			continue
+		}
+		// Validate the full wire packet first. Applications see only the body;
+		// CaptureUDP separately preserves the complete payload for observation.
+		packet.Payload = packet.Payload[len(c.config.MagicHeader):]
 		select {
 		case c.inbox <- packet:
 		default:

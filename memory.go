@@ -2,7 +2,10 @@ package pcapnet
 
 import (
 	"context"
+	"fmt"
 	"sync"
+
+	"github.com/MeHungr/pcapnet/internal/queue"
 )
 
 // A memoryPair represents a pair of in-memory queues
@@ -10,6 +13,9 @@ type memoryPair struct {
 	aToB chan []byte
 	bToA chan []byte
 
+	mu        sync.Mutex // Registers operations before Close waits for them.
+	active    sync.WaitGroup
+	closed    bool
 	done      chan struct{}
 	closeOnce sync.Once
 }
@@ -56,15 +62,17 @@ func NewMemoryPair(capacity int) (*MemoryTransport, *MemoryTransport) {
 
 // Send sends a packet over the MemoryTransport.outbound channel
 func (m *MemoryTransport) Send(ctx context.Context, packet []byte) error {
+	if ctx == nil {
+		return fmt.Errorf("packet context is required")
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	select {
-	case <-m.pair.done:
+	if !m.begin() {
 		return ErrClosed
-	default:
 	}
+	defer m.pair.active.Done()
 
 	// The receiver must own an independent copy of the packet
 	data := append([]byte(nil), packet...)
@@ -81,15 +89,17 @@ func (m *MemoryTransport) Send(ctx context.Context, packet []byte) error {
 
 // Receive receives a packet over the MemoryTransport.inbound channel
 func (m *MemoryTransport) Receive(ctx context.Context) ([]byte, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("packet context is required")
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	select {
-	case <-m.pair.done:
+	if !m.begin() {
 		return nil, ErrClosed
-	default:
 	}
+	defer m.pair.active.Done()
 
 	select {
 	case <-ctx.Done():
@@ -101,11 +111,34 @@ func (m *MemoryTransport) Receive(ctx context.Context) ([]byte, error) {
 	}
 }
 
-// Close gracefully closes the MemoryTransport
+// Close interrupts operations and releases both directions' buffered packets.
 func (m *MemoryTransport) Close() error {
+	if m == nil || m.pair == nil {
+		return nil
+	}
 	m.pair.closeOnce.Do(func() {
+		m.pair.mu.Lock()
+		m.pair.closed = true
 		close(m.pair.done)
+		m.pair.mu.Unlock()
+		m.pair.active.Wait()
+		queue.Drain(m.pair.aToB)
+		queue.Drain(m.pair.bToA)
 	})
 
 	return nil
+}
+
+// begin prevents a new operation from racing with Close's WaitGroup wait.
+func (m *MemoryTransport) begin() bool {
+	if m == nil || m.pair == nil {
+		return false
+	}
+	m.pair.mu.Lock()
+	defer m.pair.mu.Unlock()
+	if m.pair.closed {
+		return false
+	}
+	m.pair.active.Add(1)
+	return true
 }

@@ -68,7 +68,7 @@ func readLiveSettings(t *testing.T) liveSettings {
 	if err != nil {
 		t.Fatal(err)
 	}
-	virtual, err := (Config{VirtualIP: localIP, PeerVirtualIP: peerIP, MTU: uint32(mtu)}).normalize()
+	virtual, err := (Config{VirtualIP: localIP, PeerSubnet: netip.PrefixFrom(peerIP, 32), MTU: uint32(mtu)}).normalize()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestLivePCAPTCPEcho(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	conn, err := v.Dial(ctx, cfg.virtual.PeerVirtualIP.String(), 6767)
+	conn, err := v.Dial(ctx, cfg.virtual.PeerSubnet.Addr().String(), 6767)
 	if err != nil {
 		t.Fatal(err)
 	}

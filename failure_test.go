@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -175,7 +176,7 @@ func TestWorkerFailureUnblocksTCPIO(t *testing.T) {
 	}
 	t.Cleanup(func() { closeTestStack(t, control) })
 	cfg := newTestConfig()
-	cfg.VirtualIP, cfg.PeerVirtualIP = cfg.PeerVirtualIP, cfg.VirtualIP
+	cfg.VirtualIP, cfg.PeerSubnet = cfg.PeerSubnet.Addr(), netip.PrefixFrom(cfg.VirtualIP, 32)
 	target, err := NewVirtualStackWithTransport(cfg, remote)
 	if err != nil {
 		_ = remote.Close()

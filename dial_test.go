@@ -132,10 +132,10 @@ func TestDialConfiguration(t *testing.T) {
 	// Verify the configured peer IP.
 	want := netip.MustParseAddr("10.200.0.2")
 
-	if v.config.PeerVirtualIP != want {
+	if v.config.PeerSubnet.Addr() != want {
 		t.Fatalf(
 			"peer IP = %s, want %s",
-			v.config.PeerVirtualIP,
+			v.config.PeerSubnet,
 			want,
 		)
 	}

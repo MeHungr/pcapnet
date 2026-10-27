@@ -1,6 +1,7 @@
 package pcapnet
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -10,36 +11,6 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
-
-// makeEthernetFrame takes values to create an ethernet frame and returns a layers.Ethernet
-func makeEthernetFrame(srcMAC, dstMAC net.HardwareAddr, etherType layers.EthernetType) *layers.Ethernet {
-	return &layers.Ethernet{
-		SrcMAC:       srcMAC,
-		DstMAC:       dstMAC,
-		EthernetType: etherType,
-	}
-}
-
-// makeARPPacket takes values to create an arp packet and returns a layers.ARP
-func makeARPPacket(
-	addrType layers.LinkType,
-	proto layers.EthernetType,
-	macSize, protoAddrSize uint8,
-	operation uint16,
-	sourceMAC, sourceProtoAddr, dstMAC, dstProtoAddr []byte,
-) *layers.ARP {
-	return &layers.ARP{
-		AddrType:          addrType,
-		Protocol:          proto,
-		HwAddressSize:     macSize,
-		ProtAddressSize:   protoAddrSize,
-		Operation:         operation,
-		SourceHwAddress:   sourceMAC,
-		SourceProtAddress: sourceProtoAddr,
-		DstHwAddress:      dstMAC,
-		DstProtAddress:    dstProtoAddr,
-	}
-}
 
 // resolveARP resolves a next-hop IPv4 address to its MAC address
 func resolveARP(ctx context.Context, device *pcap.Interface, srcMAC net.HardwareAddr, srcIP, nextHop net.IP) (net.HardwareAddr, error) {
@@ -91,28 +62,14 @@ func resolveARP(ctx context.Context, device *pcap.Interface, srcMAC net.Hardware
 		return nil, fmt.Errorf("set filter: %w", err)
 	}
 
-	// Broadcast MAC address
-	broadcastMAC := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-
-	// Generate an Ethernet frame
-	eth := makeEthernetFrame(
-		srcMAC,
-		broadcastMAC,
-		layers.EthernetTypeARP,
-	)
-
-	// Generate an ARP packet
-	arp := makeARPPacket(
-		layers.LinkTypeEthernet,
-		layers.EthernetTypeIPv4,
-		6,
-		4,
-		layers.ARPRequest,
-		[]byte(srcMAC),
-		[]byte(src4),
-		make([]byte, 6),
-		[]byte(dst4),
-	)
+	// Broadcast an Ethernet/IPv4 ARP request on the selected capture device.
+	eth := &layers.Ethernet{SrcMAC: srcMAC, DstMAC: net.HardwareAddr{255, 255, 255, 255, 255, 255}, EthernetType: layers.EthernetTypeARP}
+	arp := &layers.ARP{
+		AddrType: layers.LinkTypeEthernet, Protocol: layers.EthernetTypeIPv4,
+		HwAddressSize: 6, ProtAddressSize: 4, Operation: layers.ARPRequest,
+		SourceHwAddress: srcMAC, SourceProtAddress: src4,
+		DstHwAddress: make([]byte, 6), DstProtAddress: dst4,
+	}
 
 	// Create a buffer to serialize the structs to raw bytes
 	buf := gopacket.NewSerializeBuffer()
@@ -190,23 +147,10 @@ func pollARPReply(ctx context.Context, handle *pcap.Handle, srcMAC net.HardwareA
 		}
 
 		// If the destination MAC address is not our MAC address, continue
-		if !equalMAC(reply.DstHwAddress, srcMAC) {
+		if !bytes.Equal(reply.DstHwAddress, srcMAC) {
 			continue
 		}
 
 		return append(net.HardwareAddr(nil), reply.SourceHwAddress...), nil
 	}
-}
-
-// equalMAC determines whether 2 MAC addresses are equal
-func equalMAC(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

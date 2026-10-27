@@ -218,3 +218,22 @@ func TestMemoryTransportConcurrentClose(t *testing.T) {
 		t.Fatalf("expected ErrClosed, got %v", err)
 	}
 }
+
+func TestMemoryCloseReleasesQueuedPackets(t *testing.T) {
+	a, b := NewMemoryPair(2)
+	if err := a.Send(context.Background(), []byte("outbound")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Send(context.Background(), []byte("inbound")); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.pair.aToB) != 0 || len(a.pair.bToA) != 0 {
+		t.Fatal("closed pair retained packet buffers")
+	}
+	if _, err := b.Receive(context.Background()); !errors.Is(err, ErrClosed) {
+		t.Fatal(err)
+	}
+}

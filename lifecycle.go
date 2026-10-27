@@ -4,7 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
+
+	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 // managedConn represents a TCP connection owned by a VirtualStack.
@@ -245,3 +248,30 @@ var _ net.Conn = (*managedConn)(nil)
 
 // Verify that managed listeners implement net.Listener.
 var _ net.Listener = (*managedListener)(nil)
+
+// expireVirtualPeer initiates abort of registered TCP state for an expiring
+// assignment. This covers pending accepts and TIME_WAIT, as well as managed
+// connections. Stack destruction joins the session expiry worker first.
+func (v *VirtualStack) expireVirtualPeer(ip netip.Addr) {
+	endpoints := append(v.Stack.RegisteredEndpoints(), v.Stack.CleanupEndpoints()...)
+	for _, endpoint := range endpoints {
+		if addressed, ok := endpoint.(tcpip.Endpoint); ok {
+			remote, err := addressed.GetRemoteAddress()
+			if err == nil && remote.Addr == tcpip.AddrFrom4(ip.As4()) {
+				endpoint.Abort()
+			}
+		}
+	}
+	// managed Close unregisters itself, so release the registry lock first.
+	v.mu.Lock()
+	var stale []net.Conn
+	for conn := range v.conns {
+		if addr, ok := conn.RemoteAddr().(*net.TCPAddr); ok && addr.IP.Equal(ip.AsSlice()) {
+			stale = append(stale, conn)
+		}
+	}
+	v.mu.Unlock()
+	for _, conn := range stale {
+		_ = conn.Close()
+	}
+}

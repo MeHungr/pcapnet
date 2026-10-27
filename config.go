@@ -12,15 +12,11 @@ const (
 
 // A Config represents the gVisor endpoint configuration.
 type Config struct {
-	// DeviceName is retained for compatibility with existing callers.
-	// New tunnel configuration uses PCAPConfig.DeviceName instead.
-	DeviceName string
-
 	// IPv4 address belonging to this gVisor endpoint.
 	VirtualIP netip.Addr
 
-	// IPv4 address belonging to the peer's gVisor endpoint.
-	PeerVirtualIP netip.Addr
+	// Permitted remote IPv4 addresses routed through the tunnel.
+	PeerSubnet netip.Prefix
 
 	// MTU of the in-memory gVisor link.
 	MTU uint32
@@ -36,11 +32,12 @@ func (c Config) normalize() (Config, error) {
 		return c, fmt.Errorf("invalid virtual IPv4 address")
 	}
 
-	if !validVirtualIP(c.PeerVirtualIP) {
-		return c, fmt.Errorf("invalid peer virtual IPv4 address")
+	if !c.PeerSubnet.IsValid() || !c.PeerSubnet.Addr().Is4() || c.PeerSubnet.Bits() == 0 || !validVirtualIP(c.PeerSubnet.Masked().Addr()) {
+		return c, fmt.Errorf("invalid peer IPv4 subnet")
 	}
 
-	if c.VirtualIP == c.PeerVirtualIP {
+	c.PeerSubnet = c.PeerSubnet.Masked()
+	if c.PeerSubnet.Bits() == 32 && c.VirtualIP == c.PeerSubnet.Addr() {
 		return c, fmt.Errorf("virtual IP and peer virtual IP must differ")
 	}
 

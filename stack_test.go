@@ -11,9 +11,9 @@ import (
 // newTestConfig creates a generic test Config
 func newTestConfig() Config {
 	return Config{
-		VirtualIP:     netip.MustParseAddr("10.200.0.1"),
-		PeerVirtualIP: netip.MustParseAddr("10.200.0.2"),
-		MTU:           1200,
+		VirtualIP:  netip.MustParseAddr("10.200.0.1"),
+		PeerSubnet: netip.MustParsePrefix("10.200.0.2/32"),
+		MTU:        1200,
 	}
 }
 
@@ -86,7 +86,7 @@ func TestVirtualStackRoute(t *testing.T) {
 	defer v.Close()
 
 	routes := v.Stack.GetRouteTable()
-	want := tcpip.AddrFrom4(cfg.PeerVirtualIP.As4())
+	want := tcpip.AddrFrom4(cfg.PeerSubnet.Addr().As4())
 
 	found := false
 
@@ -101,7 +101,7 @@ func TestVirtualStackRoute(t *testing.T) {
 		}
 
 		if !found {
-			t.Fatalf("no route to peer %s through virtual NIC", cfg.PeerVirtualIP)
+			t.Fatalf("no route to peer %s through virtual NIC", cfg.PeerSubnet)
 		}
 	}
 }

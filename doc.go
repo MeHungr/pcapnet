@@ -2,8 +2,17 @@
 // DialUDP and ListenUDP exchange application datagrams with physical peers
 // through PCAP without creating a gVisor stack or tunnel. UDPConn implements
 // net.Conn and net.PacketConn with packet boundaries and mutable deadlines.
+// UDPConfig.MagicHeader optionally prepends a payload prefix on writes and
+// matches/removes it on reads; a dialed connection also receives peer replies.
+// CaptureUDP observes a configurable UDP payload prefix across all ports at one
+// local IPv4 address, without reserving ports or providing a send operation.
 //
-// TCP uses a gVisor stack with pluggable packet transport.
+// PCAT (Packet Capture and Allocation Transport) carries TCP over UDP sessions.
+// TCP uses a gVisor stack with pluggable packet transport. DialPCAPStack
+// allocates a client address; ListenPCAPTCP serves multiple clients through one
+// shared stack. DatagramEndpoint separates session allocation from delivery;
+// PlainUDPEndpoint provides unencrypted PCAP UDP; the optional dtlstransport
+// subpackage adds DTLS without importing it into the core package.
 // NewVirtualStackWithTransport connects the stack to a PacketTransport and owns
 // its workers and transport until shutdown. NewMemoryPair connects stacks in
 // memory; NewPCAPTransport encapsulates inner IPv4 packets in Ethernet/IPv4/UDP

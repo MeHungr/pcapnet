@@ -157,7 +157,7 @@ func TestPCAPTunnelsTCPEcho(t *testing.T) {
 			}
 			t.Cleanup(func() { closeTestStack(t, control) })
 			cfg := newTestConfig()
-			cfg.VirtualIP, cfg.PeerVirtualIP = cfg.PeerVirtualIP, cfg.VirtualIP
+			cfg.VirtualIP, cfg.PeerSubnet = cfg.PeerSubnet.Addr(), netip.PrefixFrom(cfg.VirtualIP, 32)
 			target, err := NewVirtualStackWithTransport(cfg, rightTransport)
 			if err != nil {
 				t.Fatal(err)

@@ -12,17 +12,22 @@ import (
 	"time"
 
 	"github.com/MeHungr/pcapnet"
+	"github.com/MeHungr/pcapnet/dtlstransport"
+	"github.com/MeHungr/pcapnet/examples/internal/certificates"
 )
 
 var (
-	peerAddress        = flag.String("peer", "", "server physical IPv4 address and outer UDP port")
-	localPort          = flag.Uint("local-port", 45000, "local outer UDP port")
-	virtualAddress     = flag.String("virtual-ip", "10.200.0.1", "local virtual IPv4 address")
-	peerVirtualAddress = flag.String("peer-virtual-ip", "10.200.0.2", "server virtual IPv4 address")
-	tcpPort            = flag.Uint("tcp-port", 6767, "server virtual TCP port")
-	deviceName         = flag.String("device", "", "capture device (empty selects automatically)")
-	reservePort        = flag.Bool("reserve-port", false, "reserve the outer port with a host UDP socket")
-	message            = flag.String("message", "hello", "nonempty message to echo")
+	useDTLS     = flag.Bool("dtls", false, "encrypt and authenticate the tunnel with DTLS")
+	caFile      = flag.String("ca", "", "trusted server CA PEM file (empty uses system roots)")
+	certFile    = flag.String("cert", "", "optional client certificate PEM file")
+	keyFile     = flag.String("key", "", "optional client private key PEM file")
+	serverName  = flag.String("server-name", "", "verified DTLS server name (defaults to peer IP)")
+	peerAddress = flag.String("peer", "", "server physical IPv4 address and outer UDP port")
+	localPort   = flag.Uint("local-port", 45000, "local outer UDP port")
+	tcpPort     = flag.Uint("tcp-port", 6767, "server virtual TCP port")
+	deviceName  = flag.String("device", "", "capture device (empty selects automatically)")
+	reservePort = flag.Bool("reserve-port", false, "reserve the outer port with a host UDP socket")
+	message     = flag.String("message", "hello", "nonempty message to echo")
 )
 
 func main() {
@@ -37,14 +42,6 @@ func run() (resultErr error) {
 	if err != nil {
 		return fmt.Errorf("invalid -peer: %w", err)
 	}
-	localIP, err := netip.ParseAddr(*virtualAddress)
-	if err != nil {
-		return fmt.Errorf("invalid -virtual-ip: %w", err)
-	}
-	peerIP, err := netip.ParseAddr(*peerVirtualAddress)
-	if err != nil {
-		return fmt.Errorf("invalid -peer-virtual-ip: %w", err)
-	}
 	if *localPort == 0 || *localPort > 65535 || *tcpPort == 0 || *tcpPort > 65535 {
 		return fmt.Errorf("ports must be between 1 and 65535")
 	}
@@ -54,19 +51,40 @@ func run() (resultErr error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cfg := pcapnet.PCAPConfig{DeviceName: *deviceName, LocalPort: uint16(*localPort), Peer: peer, MTU: 1200, ReserveUDPPort: *reservePort}
-	virtualCfg := pcapnet.Config{VirtualIP: localIP, PeerVirtualIP: peerIP, MTU: cfg.MTU}
-	transport, err := pcapnet.NewPCAPTransport(ctx, cfg)
+	cfg := pcapnet.UDPConfig{DeviceName: *deviceName, LocalPort: uint16(*localPort), ReserveUDPPort: *reservePort}
+	var v *pcapnet.VirtualStack
+	var assigned pcapnet.Assignment
+	if *useDTLS {
+		certs, roots, loadErr := certificates.Load(*certFile, *keyFile, *caFile)
+		if loadErr != nil {
+			return loadErr
+		}
+		name := *serverName
+		if name == "" {
+			name = peer.Addr().String()
+		}
+		udp, openErr := pcapnet.DialUDP(ctx, cfg, peer)
+		if openErr != nil {
+			return openErr
+		}
+		raw, _ := pcapnet.NewPlainUDPEndpoint(udp)
+		secure, secureErr := dtlstransport.Dial(ctx, raw, pcapnet.Peer{AddrPort: peer}, dtlstransport.ClientConfig{ServerName: name, RootCAs: roots, Certificates: certs})
+		if secureErr != nil {
+			return errors.Join(secureErr, raw.Close())
+		}
+		v, assigned, err = pcapnet.DialStack(ctx, secure, secure.Peer(), 1200)
+	} else {
+		if *caFile != "" || *certFile != "" || *keyFile != "" || *serverName != "" {
+			return fmt.Errorf("certificate flags require -dtls")
+		}
+		v, assigned, err = pcapnet.DialPCAPStack(ctx, cfg, peer, 1200)
+	}
 	if err != nil {
 		return err
 	}
-	v, err := pcapnet.NewVirtualStackWithTransport(virtualCfg, transport)
-	if err != nil {
-		return errors.Join(err, transport.Close())
-	}
 	defer func() { v.Close(); resultErr = errors.Join(resultErr, v.Err()) }()
 
-	conn, err := v.Dial(ctx, peerIP.String(), int(*tcpPort))
+	conn, err := v.Dial(ctx, assigned.ServerIP.String(), int(*tcpPort))
 	if err != nil {
 		return err
 	}

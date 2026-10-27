@@ -16,16 +16,24 @@ import (
 	"time"
 
 	"github.com/MeHungr/pcapnet"
+	"github.com/MeHungr/pcapnet/dtlstransport"
+	"github.com/MeHungr/pcapnet/examples/internal/certificates"
 )
 
 var (
-	peerAddress        = flag.String("peer", "", "client physical IPv4 address and outer UDP port")
-	localPort          = flag.Uint("local-port", 45001, "local outer UDP port")
-	virtualAddress     = flag.String("virtual-ip", "10.200.0.2", "local virtual IPv4 address")
-	peerVirtualAddress = flag.String("peer-virtual-ip", "10.200.0.1", "client virtual IPv4 address")
-	tcpPort            = flag.Uint("tcp-port", 6767, "virtual TCP listening port")
-	deviceName         = flag.String("device", "", "capture device (empty selects automatically)")
-	reservePort        = flag.Bool("reserve-port", false, "reserve the outer port with a host UDP socket")
+	useDTLS           = flag.Bool("dtls", false, "encrypt and authenticate the tunnel with DTLS")
+	certFile          = flag.String("cert", "", "server certificate PEM file (required with -dtls)")
+	keyFile           = flag.String("key", "", "server private key PEM file (required with -dtls)")
+	caFile            = flag.String("ca", "", "trusted client CA PEM file")
+	requireClientCert = flag.Bool("require-client-cert", false, "require a trusted DTLS client certificate")
+	localAddress      = flag.String("local-ip", "", "server physical IPv4 listening address")
+	localPort         = flag.Uint("local-port", 45001, "local outer UDP port")
+	virtualAddress    = flag.String("virtual-ip", "10.200.0.2", "local virtual IPv4 address")
+	addressPool       = flag.String("subnet", "10.200.0.0/24", "virtual address allocation subnet")
+	maxPeers          = flag.Int("max-peers", 64, "maximum active sessions")
+	tcpPort           = flag.Uint("tcp-port", 6767, "virtual TCP listening port")
+	deviceName        = flag.String("device", "", "capture device (empty selects automatically)")
+	reservePort       = flag.Bool("reserve-port", false, "reserve the outer port with a host UDP socket")
 )
 
 func main() {
@@ -36,17 +44,13 @@ func main() {
 }
 
 func run() (resultErr error) {
-	peer, err := netip.ParseAddrPort(*peerAddress)
-	if err != nil {
-		return fmt.Errorf("invalid -peer: %w", err)
-	}
 	localIP, err := netip.ParseAddr(*virtualAddress)
 	if err != nil {
 		return fmt.Errorf("invalid -virtual-ip: %w", err)
 	}
-	peerIP, err := netip.ParseAddr(*peerVirtualAddress)
+	physicalIP, err := netip.ParseAddr(*localAddress)
 	if err != nil {
-		return fmt.Errorf("invalid -peer-virtual-ip: %w", err)
+		return fmt.Errorf("invalid -local-ip: %w", err)
 	}
 	if *localPort == 0 || *localPort > 65535 || *tcpPort == 0 || *tcpPort > 65535 {
 		return fmt.Errorf("ports must be between 1 and 65535")
@@ -56,30 +60,51 @@ func run() (resultErr error) {
 	defer stop()
 	setupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cfg := pcapnet.PCAPConfig{DeviceName: *deviceName, LocalPort: uint16(*localPort), Peer: peer, MTU: 1200, ReserveUDPPort: *reservePort}
-	virtualCfg := pcapnet.Config{VirtualIP: localIP, PeerVirtualIP: peerIP, MTU: cfg.MTU}
-	transport, err := pcapnet.NewPCAPTransport(setupCtx, cfg)
+	pool, err := netip.ParsePrefix(*addressPool)
+	if err != nil {
+		return fmt.Errorf("invalid -subnet: %w", err)
+	}
+	udpCfg := pcapnet.UDPConfig{DeviceName: *deviceName, LocalIP: physicalIP, LocalPort: uint16(*localPort), ReserveUDPPort: *reservePort}
+	serverCfg := pcapnet.ServerConfig{VirtualIP: localIP, AddressPool: pool, MTU: 1200, MaxPeers: *maxPeers}
+	var listener *pcapnet.TCPServer
+	if *useDTLS {
+		certs, roots, loadErr := certificates.Load(*certFile, *keyFile, *caFile)
+		if loadErr != nil {
+			return loadErr
+		}
+		if len(certs) == 0 {
+			return fmt.Errorf("-dtls requires -cert and -key")
+		}
+		if *caFile != "" && !*requireClientCert {
+			return fmt.Errorf("-ca requires -require-client-cert on the server")
+		}
+		udp, openErr := pcapnet.ListenUDP(setupCtx, udpCfg)
+		if openErr != nil {
+			return openErr
+		}
+		raw, _ := pcapnet.NewPlainUDPEndpoint(udp)
+		secure, secureErr := dtlstransport.Listen(raw, dtlstransport.ServerConfig{Certificates: certs, ClientCAs: roots, RequireClientCertificate: *requireClientCert, Limits: dtlstransport.Limits{MaxPeers: *maxPeers}})
+		if secureErr != nil {
+			return errors.Join(secureErr, raw.Close())
+		}
+		listener, err = pcapnet.NewTCPServer(secure, serverCfg, int(*tcpPort))
+		if err != nil {
+			return errors.Join(err, secure.Close())
+		}
+	} else {
+		if *certFile != "" || *keyFile != "" || *caFile != "" || *requireClientCert {
+			return fmt.Errorf("certificate flags require -dtls")
+		}
+		listener, err = pcapnet.ListenPCAPTCP(setupCtx, udpCfg, serverCfg, int(*tcpPort))
+	}
 	if err != nil {
 		return err
-	}
-	v, err := pcapnet.NewVirtualStackWithTransport(virtualCfg, transport)
-	if err != nil {
-		return errors.Join(err, transport.Close())
 	}
 	var workers sync.WaitGroup
-	defer func() {
-		v.Close() // Wake Accept and all connection I/O before joining handlers.
-		workers.Wait()
-		resultErr = errors.Join(resultErr, v.Err())
-	}()
-	stopClose := context.AfterFunc(ctx, v.Close)
+	defer func() { resultErr = errors.Join(resultErr, listener.Close()); workers.Wait() }()
+	stopClose := context.AfterFunc(ctx, func() { _ = listener.Close() })
 	defer stopClose()
-	listener, err := v.Listen(int(*tcpPort))
-	if err != nil {
-		return err
-	}
-	defer listener.Close()
-	fmt.Printf("TCP listening on %s over UDP port %d (Ctrl+C to stop)\n", listener.Addr(), cfg.LocalPort)
+	fmt.Printf("TCP listening on %s over UDP port %d (Ctrl+C to stop)\n", listener.Addr(), *localPort)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -93,8 +118,7 @@ func run() (resultErr error) {
 	}
 }
 
-// echo closes only its connection. The owning stack remains alive for queued
-// replies, TCP teardown, and subsequent connections until the server stops.
+// echo closes only its connection; the shared server retains its sessions.
 func echo(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {

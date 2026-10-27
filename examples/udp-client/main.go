@@ -18,6 +18,7 @@ var (
 	localPort   = flag.Uint("local-port", 45000, "local UDP source port")
 	deviceName  = flag.String("device", "", "capture device (empty selects automatically)")
 	reservePort = flag.Bool("reserve-port", false, "reserve the local port with a host UDP socket")
+	magicHeader = flag.String("magic", "", "optional payload prefix; must match the other endpoint")
 	message     = flag.String("message", "hello", "datagram payload")
 )
 
@@ -43,6 +44,7 @@ func run() (resultErr error) {
 		DeviceName:     *deviceName,
 		LocalPort:      uint16(*localPort),
 		ReserveUDPPort: *reservePort,
+		MagicHeader:    []byte(*magicHeader),
 	}
 	conn, err := pcapnet.DialUDP(ctx, cfg, peer)
 	if err != nil {

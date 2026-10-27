@@ -1,6 +1,7 @@
 package pcapnet
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -74,15 +75,27 @@ func udpFrame(local, remote netip.AddrPort, src, dst net.HardwareAddr, payload [
 // one whole datagram. Application and route errors do not close the endpoint;
 // native injection failures do, because the capture/injection link is unusable.
 func (c *UDPConn) writeTo(payload []byte, peer netip.AddrPort) (int, error) {
+	return c.writeToContext(context.Background(), payload, peer)
+}
+
+// writeToContext combines a tunnel operation lifetime with UDP shutdown and deadlines.
+func (c *UDPConn) writeToContext(parent context.Context, payload []byte, peer netip.AddrPort) (int, error) {
 	ctx, finish, err := c.operation(true)
 	if err != nil {
 		return 0, c.opError("write", err)
 	}
 	defer finish()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(parent, cancel)
+	defer stop()
+	if parent.Err() != nil {
+		return 0, parent.Err()
+	}
 	if !validUDPHost(peer.Addr()) || peer.Port() == 0 {
 		return 0, c.opError("write", fmt.Errorf("destination must be a unicast IPv4 endpoint"))
 	}
-	if len(payload) > int(c.config.MTU)-28 {
+	if len(payload) > c.MaxDatagramSize() {
 		return 0, c.opError("write", ErrDatagramTooLarge)
 	}
 	select {
@@ -100,10 +113,10 @@ func (c *UDPConn) writeTo(payload []byte, peer netip.AddrPort) (int, error) {
 		if err != nil {
 			return 0, c.opError("write", fmt.Errorf("lookup UDP destination route: %w", err))
 		}
-		if iface == nil || iface.MTU < 28 || !source.Equal(net.IP(c.config.LocalIP.AsSlice())) || !equalMAC(iface.HardwareAddr, c.resources.srcMAC) {
+		if iface == nil || iface.MTU < 28 || !source.Equal(net.IP(c.config.LocalIP.AsSlice())) || !bytes.Equal(iface.HardwareAddr, c.resources.srcMAC) {
 			return 0, c.opError("write", fmt.Errorf("destination route does not match local UDP endpoint"))
 		}
-		if len(payload) > iface.MTU-28 {
+		if len(payload) > iface.MTU-28-len(c.config.MagicHeader) {
 			return 0, c.opError("write", ErrDatagramTooLarge)
 		}
 		mac, err = c.resolveMAC(ctx, &pcap.Interface{Name: c.config.DeviceName}, peer.Addr(), gateway)
@@ -114,7 +127,15 @@ func (c *UDPConn) writeTo(payload []byte, peer netip.AddrPort) (int, error) {
 			return 0, c.opError("write", err)
 		}
 	}
-	frame, err := udpFrame(c.resources.local, peer, c.resources.srcMAC, mac, payload)
+	// Build framing in a fresh buffer so even a caller's spare slice capacity
+	// remains untouched. Counts and MTU limits refer to the application body.
+	wirePayload := payload
+	if len(c.config.MagicHeader) != 0 {
+		wirePayload = make([]byte, len(c.config.MagicHeader)+len(payload))
+		copy(wirePayload, c.config.MagicHeader)
+		copy(wirePayload[len(c.config.MagicHeader):], payload)
+	}
+	frame, err := udpFrame(c.resources.local, peer, c.resources.srcMAC, mac, wirePayload)
 	if err != nil {
 		return 0, c.opError("write", err)
 	}

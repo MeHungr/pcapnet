@@ -54,9 +54,25 @@ func NewVirtualStackWithTransport(cfg Config, transport PacketTransport) (*Virtu
 			return nil, fmt.Errorf("stack MTU %d does not match PCAP transport MTU %d", cfg.MTU, p.resources.config.MTU)
 		}
 	}
+	switch p := transport.(type) {
+	case *ClientTransport:
+		if p.ctx.Err() != nil || cfg.VirtualIP != p.assignment.VirtualIP || cfg.PeerSubnet != netip.PrefixFrom(p.assignment.ServerIP, 32) || cfg.MTU != p.assignment.MTU {
+			return nil, fmt.Errorf("stack configuration does not match client assignment")
+		}
+	case *ServerTransport:
+		if p.ctx.Err() != nil || cfg.VirtualIP != p.config.VirtualIP || cfg.PeerSubnet != p.config.AddressPool || cfg.MTU != p.config.MTU {
+			return nil, fmt.Errorf("stack configuration does not match server allocation policy")
+		}
+	}
 	v, err := NewVirtualStack(cfg)
 	if err != nil {
 		return nil, err
+	}
+
+	if p, ok := transport.(*ServerTransport); ok {
+		p.mu.Lock()
+		p.expire = v.expireVirtualPeer
+		p.mu.Unlock()
 	}
 
 	// All fallible validation is complete. The bridge now owns the transport
@@ -73,10 +89,15 @@ func NewVirtualStackWithTransport(cfg Config, transport PacketTransport) (*Virtu
 // nilPacketTransport detects nil values hidden behind an interface. User-defined
 // transport implementations can have any nil-capable underlying Go type.
 func nilPacketTransport(transport PacketTransport) bool {
-	if transport == nil {
+	return nilInterface(transport)
+}
+
+// nilInterface rejects typed nil implementations before invoking their methods.
+func nilInterface(implementation any) bool {
+	if implementation == nil {
 		return true
 	}
-	value := reflect.ValueOf(transport)
+	value := reflect.ValueOf(implementation)
 	switch value.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		return value.IsNil()
@@ -136,7 +157,7 @@ func (b *packetBridge) egress(ctx context.Context) error {
 		view.Release()
 		pkt.DecRef()
 
-		if !b.validPacket(data, b.config.VirtualIP, b.config.PeerVirtualIP) {
+		if !b.validPacket(data, false) {
 			continue
 		}
 		if err := b.transport.Send(ctx, data); err != nil {
@@ -145,8 +166,8 @@ func (b *packetBridge) egress(ctx context.Context) error {
 	}
 }
 
-// ingress accepts packets for the configured virtual pair and injects them into
-// gVisor. The transport supplies owned bytes; gVisor retains its own reference
+// ingress accepts packets for the local address from the remote subnet and
+// injects them into gVisor. The transport supplies owned bytes; gVisor retains a reference
 // while processing after our local packet reference is released.
 func (b *packetBridge) ingress(ctx context.Context) error {
 	for {
@@ -157,7 +178,7 @@ func (b *packetBridge) ingress(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if !b.validPacket(data, b.config.PeerVirtualIP, b.config.VirtualIP) {
+		if !b.validPacket(data, true) {
 			continue
 		}
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(data)})
@@ -168,12 +189,17 @@ func (b *packetBridge) ingress(ctx context.Context) error {
 
 // validPacket enforces IPv4 framing, MTU, and direction-specific virtual peers.
 // Checksums and TCP behavior remain the responsibility of the receiving stack.
-func (b *packetBridge) validPacket(data []byte, source, destination netip.Addr) bool {
-	if err := validateInnerIPv4(data, b.config.MTU); err != nil {
+func (b *packetBridge) validPacket(data []byte, inbound bool) bool {
+	if validateInnerIPv4(data, b.config.MTU) != nil {
 		return false
 	}
-	return netip.AddrFrom4([4]byte(data[12:16])) == source &&
-		netip.AddrFrom4([4]byte(data[16:20])) == destination
+	source := netip.AddrFrom4([4]byte(data[12:16]))
+	destination := netip.AddrFrom4([4]byte(data[16:20]))
+	local, remote := source, destination
+	if inbound {
+		local, remote = destination, source
+	}
+	return local == b.config.VirtualIP && remote != local && validVirtualIP(remote) && b.config.PeerSubnet.Contains(remote)
 }
 
 // Close cancels both workers, closes the owned transport to unblock pending I/O,

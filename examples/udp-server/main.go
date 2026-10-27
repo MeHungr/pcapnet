@@ -19,6 +19,7 @@ var (
 	localAddress = flag.String("local", "", "host IPv4 address and UDP port to listen on")
 	deviceName   = flag.String("device", "", "capture device (empty selects automatically)")
 	reservePort  = flag.Bool("reserve-port", false, "reserve the local port with a host UDP socket")
+	magicHeader  = flag.String("magic", "", "optional payload prefix; must match the other endpoint")
 )
 
 func main() {
@@ -43,6 +44,7 @@ func run() (resultErr error) {
 		LocalIP:        local.Addr(),
 		LocalPort:      local.Port(),
 		ReserveUDPPort: *reservePort,
+		MagicHeader:    []byte(*magicHeader),
 	}
 	listener, err := pcapnet.ListenUDP(setupCtx, cfg)
 	if err != nil {

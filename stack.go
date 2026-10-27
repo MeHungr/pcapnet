@@ -3,6 +3,7 @@ package pcapnet
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -46,7 +47,7 @@ func NewVirtualStack(cfg Config) (*VirtualStack, error) {
 	}
 
 	localAddr := tcpip.AddrFrom4(cfg.VirtualIP.As4())
-	peerAddr := tcpip.AddrFrom4(cfg.PeerVirtualIP.As4())
+	peerAddr := tcpip.AddrFrom4(cfg.PeerSubnet.Masked().Addr().As4())
 
 	// Create an in-memory link layer network endpoint.
 	link := channel.New(
@@ -94,10 +95,10 @@ func NewVirtualStack(cfg Config) (*VirtualStack, error) {
 		return nil, fmt.Errorf("configure gVisor address: %v", err)
 	}
 
-	// Route packets for the peer through the in-memory NIC.
+	// Route the permitted remote subnet through the in-memory NIC.
 	peerSubnet, err := tcpip.NewSubnet(
 		peerAddr, // Address
-		tcpip.MaskFromBytes([]byte{255, 255, 255, 255}), // Subnet mask (/32)
+		tcpip.MaskFromBytes(net.CIDRMask(cfg.PeerSubnet.Bits(), 32)), // Remote subnet mask
 	)
 	if err != nil {
 		s.Close()

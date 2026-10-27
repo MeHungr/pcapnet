@@ -13,8 +13,12 @@ import (
 // TestDirectUDPEthernetEcho exercises direct physical UDP with the actual BPF,
 // serialization, parsing, dial, and listener code, without gVisor or a bridge.
 func TestDirectUDPEthernetEcho(t *testing.T) {
-	for _, reserve := range []bool{false, true} {
-		t.Run(fmt.Sprint(reserve), func(t *testing.T) {
+	for _, mode := range []struct {
+		reserve bool
+		magic   []byte
+	}{{false, nil}, {true, nil}, {false, []byte{0, 0xff, 'P'}}, {true, []byte{0, 0xff, 'P'}}} {
+		reserve, magic := mode.reserve, mode.magic
+		t.Run(fmt.Sprintf("reserve=%v/magic=%x", reserve, magic), func(t *testing.T) {
 			leftMAC, rightMAC := net.HardwareAddr{2, 0, 0, 0, 0, 1}, net.HardwareAddr{2, 0, 0, 0, 0, 2}
 			left := &ethernetCapture{inbound: make(chan []byte, 1024), local: leftMAC, remote: rightMAC, done: make(chan struct{})}
 			right := &ethernetCapture{inbound: make(chan []byte, 1024), local: rightMAC, remote: leftMAC, done: make(chan struct{})}
@@ -28,19 +32,19 @@ func TestDirectUDPEthernetEcho(t *testing.T) {
 			rightOps := udpSetupOps{pcapSetupOps: ethernetSetup(t, rightPhysical, remote, right, rightPort), interfaceForIP: func(netip.Addr) (*net.Interface, error) {
 				return &net.Interface{Name: "right", HardwareAddr: rightMAC, MTU: 1500}, nil
 			}}
-			client, err := newUDPConn(context.Background(), UDPConfig{DeviceName: "left", LocalPort: 45000, ReserveUDPPort: reserve}, leftPhysical.Peer, leftOps)
+			client, err := newUDPConn(context.Background(), UDPConfig{DeviceName: "left", LocalPort: 45000, ReserveUDPPort: reserve, MagicHeader: magic}, leftPhysical.Peer, leftOps)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer client.Close()
-			server, err := newUDPConn(context.Background(), UDPConfig{DeviceName: "right", LocalIP: remote, LocalPort: 45001, ReserveUDPPort: reserve}, netip.AddrPort{}, rightOps)
+			server, err := newUDPConn(context.Background(), UDPConfig{DeviceName: "right", LocalIP: remote, LocalPort: 45001, ReserveUDPPort: reserve, MagicHeader: magic}, netip.AddrPort{}, rightOps)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer server.Close()
 			_ = client.SetDeadline(time.Now().Add(3 * time.Second))
 			_ = server.SetDeadline(time.Now().Add(3 * time.Second))
-			for _, size := range []int{0, 1, 1472} {
+			for _, size := range []int{0, 1, 1472 - len(magic)} {
 				message := bytes.Repeat([]byte{byte(size)}, size)
 				if n, err := client.Write(message); n != size || err != nil {
 					t.Fatalf("write: %d %v", n, err)
