@@ -55,7 +55,13 @@ func livePCAPSetupOps() pcapSetupOps {
 		findDevices: pcap.FindAllDevs,
 		reservePort: reserveUDPPort,
 		openCapture: func(name string, snaplen int32, promisc bool, timeout time.Duration) (captureHandle, error) {
-			return pcap.OpenLive(name, snaplen, promisc, timeout)
+			handle, err := pcap.OpenLive(name, snaplen, promisc, timeout)
+			if err != nil {
+				// Convert a failed concrete open into a genuinely nil interface.
+				// A (*pcap.Handle)(nil) inside captureHandle is not equal to nil.
+				return nil, err
+			}
+			return handle, nil
 		},
 		resolveARP: resolveARP,
 	}
@@ -113,7 +119,7 @@ func preparePCAP(ctx context.Context, cfg PCAPConfig, ops pcapSetupOps) (_ *pcap
 		return nil, fmt.Errorf("validate tunnel MTU: %w", err)
 	}
 
-	// Require the requested capture device to own the selected source address.
+	// Select or validate the capture device using the route's interface/source.
 	// Capture names may differ from OS interface names, notably with Npcap.
 	devices, err := ops.findDevices()
 	if err != nil {
@@ -123,6 +129,8 @@ func preparePCAP(ctx context.Context, cfg PCAPConfig, ops pcapSetupOps) (_ *pcap
 	if err != nil {
 		return nil, err
 	}
+	// Retain the resolved driver name for later operations and diagnostics.
+	cfg.DeviceName = device.Name
 
 	owned := &pcapResources{
 		config: cfg,
@@ -138,15 +146,19 @@ func preparePCAP(ctx context.Context, cfg PCAPConfig, ops pcapSetupOps) (_ *pcap
 	// Reserve only when requested. Raw PCAP packet transfer does not require
 	// a host socket; the CLI can select reservation independently of I/O.
 	if cfg.ReserveUDPPort {
-		owned.port, err = ops.reservePort(ctx, owned.local)
+		port, err := ops.reservePort(ctx, owned.local)
 		if err != nil {
 			return nil, fmt.Errorf("reserve local UDP endpoint: %w", err)
 		}
+		owned.port = port
 	}
-	owned.handle, err = ops.openCapture(device.Name, captureSnaplen, false, captureTimeout)
+	handle, err := ops.openCapture(device.Name, captureSnaplen, false, captureTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("open tunnel capture: %w", err)
 	}
+	// Cleanup owns only successfully acquired resources. Failed opens can
+	// return typed nil interfaces, on which calling Close would panic.
+	owned.handle = handle
 	if owned.handle.LinkType() != layers.LinkTypeEthernet {
 		return nil, fmt.Errorf("capture device is not Ethernet")
 	}
@@ -178,24 +190,53 @@ func preparePCAP(ctx context.Context, cfg PCAPConfig, ops pcapSetupOps) (_ *pcap
 	return owned, nil
 }
 
-// matchCaptureDevice validates the selected device against the route. Matching
-// by source address accommodates capture drivers with different naming schemes.
+// matchCaptureDevice selects a device for the resolved interface/source address.
+// An explicit name is validated without falling back to a different device.
+// Automatic selection prefers an exact interface name, then a unique source-IP
+// match for drivers such as Npcap. Ambiguity is an error, never a list-order guess.
 func matchCaptureDevice(name string, devices []pcap.Interface, iface *net.Interface, source net.IP) (*pcap.Interface, error) {
-	for _, device := range devices {
-		if device.Name != name {
+	if iface == nil || source.To4() == nil {
+		return nil, fmt.Errorf("capture device selection requires an interface and IPv4 source")
+	}
+	var names, addresses []*pcap.Interface
+	for i := range devices {
+		device := &devices[i]
+		if device.Name == "" || (name != "" && device.Name != name) {
 			continue
 		}
-		if device.Name == iface.Name {
-			return &device, nil
-		}
+		matchesAddress := false
 		for _, addr := range device.Addresses {
 			if addr.IP.Equal(source) {
-				return &device, nil
+				matchesAddress = true
+				break // Multiple addresses on one device still count as one match.
 			}
 		}
-		return nil, fmt.Errorf("capture device %q does not match peer route interface %q", name, iface.Name)
+		if name != "" {
+			if device.Name == iface.Name || matchesAddress {
+				return device, nil
+			}
+			return nil, fmt.Errorf("capture device %q does not match interface %q", name, iface.Name)
+		}
+		if device.Name == iface.Name {
+			names = append(names, device)
+		}
+		if matchesAddress {
+			addresses = append(addresses, device)
+		}
 	}
-	return nil, fmt.Errorf("capture device %q was not found", name)
+	if name != "" {
+		return nil, fmt.Errorf("capture device %q was not found", name)
+	}
+	if len(names) == 1 {
+		return names[0], nil
+	}
+	if len(names) > 1 || len(addresses) > 1 {
+		return nil, fmt.Errorf("multiple capture devices match interface %q or source %s; set DeviceName explicitly", iface.Name, source)
+	}
+	if len(addresses) == 1 {
+		return addresses[0], nil
+	}
+	return nil, fmt.Errorf("no capture device matches interface %q or source %s", iface.Name, source)
 }
 
 // tunnelBPFFilter accepts only the inbound outer tuple, untagged or behind one

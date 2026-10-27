@@ -28,6 +28,7 @@ type UDPPacket struct {
 	SourcePort      uint16     // Source UDP port
 	DestinationPort uint16     // Destination UDP port
 	Payload         []byte     // Independent copy of the UDP payload
+	ipLength        int        // Full IPv4 datagram length, including any IP options
 }
 
 // ParseUDPPacket parses an Ethernet II frame containing IPv4/UDP.
@@ -169,6 +170,7 @@ func ParseUDPPacket(frame []byte) (*UDPPacket, error) {
 		SourcePort:      uint16(udp.SrcPort),
 		DestinationPort: uint16(udp.DstPort),
 		Payload:         append([]byte(nil), udp.Payload...),
+		ipLength:        ipLength,
 	}, nil
 }
 

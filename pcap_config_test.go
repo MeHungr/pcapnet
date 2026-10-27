@@ -19,7 +19,7 @@ func TestPCAPConfigNormalize(t *testing.T) {
 		{name: "default MTU", change: func(c *PCAPConfig) { c.MTU = 0 }, wantMTU: DefaultMTU},
 		{name: "minimum MTU", change: func(c *PCAPConfig) { c.MTU = MinIPv4MTU }, wantMTU: MinIPv4MTU},
 		{name: "maximum MTU", change: func(c *PCAPConfig) { c.MTU = maxUDPInnerMTU }, wantMTU: maxUDPInnerMTU},
-		{name: "missing device", change: func(c *PCAPConfig) { c.DeviceName = "" }, wantErr: true},
+		{name: "automatic device", change: func(c *PCAPConfig) { c.DeviceName = "" }, wantMTU: 1400},
 		{name: "blank device", change: func(c *PCAPConfig) { c.DeviceName = " \t" }, wantErr: true},
 		{name: "zero local port", change: func(c *PCAPConfig) { c.LocalPort = 0 }, wantErr: true},
 		{name: "missing peer", change: func(c *PCAPConfig) { c.Peer = netip.AddrPort{} }, wantErr: true},

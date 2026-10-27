@@ -228,3 +228,80 @@ func TestLivePCAPReceiveCancellation(t *testing.T) {
 		t.Fatalf("live receive did not unblock during Close: %v", err)
 	}
 }
+
+// TestLiveDirectUDPEcho tests physical UDP interoperability. PCAPNET_UDP_MODE
+// selects pcap (default) or kernel independently on each host, allowing either
+// PCAP DialUDP or ListenUDP to exchange with an ordinary host UDP socket.
+func TestLiveDirectUDPEcho(t *testing.T) {
+	cfg := readLiveSettings(t)
+	if cfg.role != "client" && cfg.role != "server" {
+		t.Fatal("PCAPNET_ROLE must be client or server")
+	}
+	mode := os.Getenv("PCAPNET_UDP_MODE")
+	if mode == "" {
+		mode = "pcap"
+	}
+	if mode != "pcap" && mode != "kernel" {
+		t.Fatal("PCAPNET_UDP_MODE must be pcap or kernel")
+	}
+	_, _, source, err := lookupRoute(cfg.physical.Peer.Addr().AsSlice())
+	if err != nil {
+		t.Fatal(err)
+	}
+	localIP, ok := netip.AddrFromSlice(source.To4())
+	if !ok {
+		t.Fatal("live UDP route has no IPv4 source")
+	}
+	udpConfig := UDPConfig{DeviceName: cfg.physical.DeviceName, LocalIP: localIP, LocalPort: cfg.physical.LocalPort, ReserveUDPPort: cfg.physical.ReserveUDPPort}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	payload := bytes.Repeat([]byte("direct UDP"), 100)
+	if cfg.role == "server" {
+		var listener net.PacketConn
+		if mode == "pcap" {
+			listener, err = ListenUDP(ctx, udpConfig)
+		} else {
+			listener, err = net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(localIP, udpConfig.LocalPort)))
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		_ = listener.SetDeadline(time.Now().Add(15 * time.Second))
+		t.Logf("direct UDP server ready (%s)", mode)
+		buffer := make([]byte, 1500)
+		n, addr, err := listener.ReadFrom(buffer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(buffer[:n], payload) {
+			t.Fatal("direct UDP request mismatch")
+		}
+		if _, err := listener.WriteTo(buffer[:n], addr); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	var conn net.Conn
+	if mode == "pcap" {
+		conn, err = DialUDP(ctx, udpConfig, cfg.physical.Peer)
+	} else {
+		conn, err = net.DialUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(localIP, udpConfig.LocalPort)), net.UDPAddrFromAddrPort(cfg.physical.Peer))
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 1500)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(buffer[:n], payload) {
+		t.Fatal("direct UDP echo mismatch")
+	}
+}

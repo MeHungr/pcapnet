@@ -1,4 +1,4 @@
-module github.com/MeHungr/doodlebob/pkg/pcapnet
+module github.com/MeHungr/pcapnet
 
 go 1.27.3
 

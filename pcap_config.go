@@ -14,7 +14,8 @@ const maxUDPInnerMTU = 65535 - outerIPv4HeaderSize - outerUDPHeaderSize
 // Virtual addresses remain in Config and are carried inside the UDP payload.
 type PCAPConfig struct {
 	// DeviceName identifies the Ethernet capture device used for both capture
-	// and injection. Its route and link type are checked when opening PCAP.
+	// and injection. Empty selects the device matching the physical peer route.
+	// Explicit names are validated against that route when opening PCAP.
 	DeviceName string
 
 	// LocalPort is the nonzero outer UDP source port. The source IPv4 address
@@ -42,8 +43,8 @@ type PCAPConfig struct {
 // Physical MTU validation is deferred until the interface has been resolved.
 func (c PCAPConfig) normalize() (PCAPConfig, error) {
 	// Keep device names unchanged because capture drivers define their syntax.
-	if strings.TrimSpace(c.DeviceName) == "" {
-		return c, fmt.Errorf("a capture device name is required")
+	if c.DeviceName != "" && strings.TrimSpace(c.DeviceName) == "" {
+		return c, fmt.Errorf("capture device name cannot contain only whitespace")
 	}
 
 	if c.LocalPort == 0 {

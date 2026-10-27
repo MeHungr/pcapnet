@@ -1,26 +1,192 @@
 # pcapnet
 
-Standalone Go library for a gVisor TCP/IPv4 stack over a UDP tunnel implemented
-with gopacket and PCAP. All package source, tests, route lookup, and ARP helpers
-are in this repository's root. It has no dependency on the former `pkg/network`
-or `pkg/pcapconn` packages. There is no command-line executable yet.
+Go networking library built on gopacket/PCAP:
 
-The module retains `github.com/MeHungr/doodlebob/pkg/pcapnet` so existing imports
-continue to work. This is a local repository; no remote or hosted module has been
-created. If published at a different path, update `go.mod` and the example import.
+- **Direct UDP:** exchange datagrams with physical IPv4 peers through `net.Conn`
+  and `net.PacketConn`, without creating a gVisor stack.
+- **Tunneled TCP:** use gVisor TCP/IPv4 connections over a fixed-peer UDP tunnel.
 
-## Repository layout
+```go
+import "github.com/MeHungr/pcapnet"
+```
 
-| Files | Responsibility |
-| --- | --- |
-| `stack.go`, `dial.go`, `listen.go`, `lifecycle.go` | gVisor stack and TCP lifecycle |
-| `bridge.go`, `transport.go`, `memory.go` | Packet bridge and transport abstraction |
-| `pcap*.go`, `packet.go`, `mtu.go` | PCAP setup, UDP tunnel, validation and MTU |
-| `route.go`, `arp.go` | Local route lookup and ARP resolution |
-| `*_test.go` | Unit, integration, example, and opt-in live tests |
-| `IMPLEMENTATION.md` | Implementation history and consolidation notes |
+## Requirements
 
-Build and check the complete standalone module from this directory:
+Use the Go version specified in [go.mod](go.mod), CGO, a C compiler, and libpcap development
+headers/libraries. Live networking requires an Ethernet capture driver and
+capture/injection privileges. Loopback and non-Ethernet capture are unsupported.
+
+## Examples
+
+| Protocol | Client | Server |
+| --- | --- | --- |
+| Direct UDP | [udp-client](examples/udp-client/main.go) | [udp-server](examples/udp-server/main.go) |
+| Tunneled TCP | [tcp-client](examples/tcp-client/main.go) | [tcp-server](examples/tcp-server/main.go) |
+
+Both servers echo traffic until Ctrl+C. All four commands support `-device` for
+an explicit capture-device override and `-reserve-port` to enable optional host
+UDP reservation. Use `-h` to list flags.
+
+### UDP echo
+
+`SERVER_IP` is an IPv4 address assigned to the server's Ethernet interface. The
+client's interface and source IP are selected from its route to that address.
+Run the server first, with capture/injection privileges:
+
+```sh
+# Server host
+SERVER_IP=192.0.2.2
+go run ./examples/udp-server -local "${SERVER_IP}:45001"
+```
+
+```sh
+# Client host
+SERVER_IP=192.0.2.2
+go run ./examples/udp-client -peer "${SERVER_IP}:45001" -message "hello"
+```
+
+These examples also work with ordinary UDP peers; no tunnel or virtual addresses
+are required. The client uses local port `45000` unless `-local-port` overrides it.
+
+### TCP echo over a UDP tunnel
+
+Both hosts run pcapnet. `CLIENT_IP` and `SERVER_IP` are their physical IPv4
+addresses. Virtual addresses belong to gVisor and do not need to be assigned to
+host interfaces.
+
+```sh
+# Server host
+CLIENT_IP=192.0.2.1
+go run ./examples/tcp-server -peer "${CLIENT_IP}:45000"
+```
+
+```sh
+# Client host
+SERVER_IP=192.0.2.2
+go run ./examples/tcp-client -peer "${SERVER_IP}:45001" -message "hello"
+```
+
+| Setting                    | TCP client default | TCP server default |
+| -------------------------- | ------------------ | ------------------ |
+| Outer UDP local port       | `45000`            | `45001`            |
+| Local virtual IPv4 address | `10.200.0.1`       | `10.200.0.2`       |
+| Peer virtual IPv4 address  | `10.200.0.2`       | `10.200.0.1`       |
+| Virtual TCP port           | `6767`             | `6767`             |
+| Inner MTU                  | `1200`             | `1200`             |
+
+`-local-port`, `-virtual-ip`, `-peer-virtual-ip`, and `-tcp-port` override the
+corresponding settings. Peer settings must agree on both hosts. An ordinary
+physical TCP listener cannot serve this encapsulated connection.
+
+## API
+
+### Direct UDP
+
+[UDPConfig](udp.go) specifies the local physical endpoint:
+
+- `DialUDP(ctx, cfg, peer)` returns a connected `*UDPConn`. Use `Read` and `Write`.
+- `ListenUDP(ctx, cfg)` returns an unconnected `*UDPConn`. Use `ReadFrom` and
+  `WriteTo`; UDP has no `Accept` operation.
+- `LocalIP` is required for listening and optional for dialing. `LocalPort`
+  must be nonzero; ephemeral allocation is not provided.
+
+`UDPConn` implements `net.Conn` and `net.PacketConn`. `ReadFrom` works in either
+mode; `WriteTo` takes a `*net.UDPAddr` and is rejected on connected endpoints.
+Local/remote addresses, mutable read/write deadlines, `Close`, and `Err` are
+provided. Setup contexts affect initialization, not the endpoint's lifetime.
+
+Reads preserve datagram boundaries, including empty datagrams. A short buffer
+discards the unread tail. The receive queue holds 256 datagrams and drops new
+arrivals when full. UDP adds no retransmission, ordering, or ICMP error delivery.
+Listener replies must route through the selected source IP/MAC. Listener ARP
+cache entries expire after 30 seconds and are bounded to 64 neighbors; connected
+endpoints retain their setup route/MAC until recreated.
+
+### Tunneled TCP
+
+[PCAPConfig](pcap_config.go) configures the physical UDP tunnel;
+[Config](config.go) configures the virtual IPv4 pair and inner MTU.
+
+1. `NewPCAPTransport(ctx, cfg)` opens capture/injection and resolves the peer route
+   and next-hop MAC.
+2. `NewVirtualStackWithTransport(virtualCfg, transport)` attaches the tunnel.
+   Success transfers transport ownership to the stack; failure leaves cleanup
+   with the caller.
+3. `v.Dial(ctx, peerVirtualIP, port)` returns a `net.Conn`; `v.Listen(port)` returns
+   a `net.Listener`.
+4. `v.Close()` closes endpoints, joins workers, and releases resources. Inspect
+   `v.Err()` afterward for terminal and cleanup errors.
+
+The [TCP client](examples/tcp-client/main.go) shows both attachment cleanup paths;
+the [TCP server](examples/tcp-server/main.go) shows listening, accepting, and
+serving connections. Dial contexts bound handshakes. Connection deadlines bound
+subsequent I/O. Keep the stack alive while application data and TCP teardown are
+in progress; stack closure does not drain queued traffic.
+
+`NewMemoryPair` provides in-memory packet transport. `NewVirtualStack` creates an
+unattached stack for callers managing `Link` directly. After transport attachment,
+leave `Link` processing and transport ownership to the stack. The legacy
+`Config.DeviceName` field is unused; overrides belong in `PCAPConfig.DeviceName`.
+
+## Capture-device selection
+
+`DeviceName` is optional in both physical endpoint configurations:
+
+- TCP tunnel setup and UDP dialing use the route to the physical peer.
+- UDP listening uses the interface owning `LocalIP`, on one interface/address.
+- An explicit name must match the chosen interface or source IP.
+
+Automatic selection prefers an exact OS interface-name match, then a unique
+source-IP match for capture drivers with different names, such as Npcap. Missing
+or ambiguous matches return errors. Invalid explicit overrides never fall back.
+There is no global default-device or listen-on-all-interfaces mode.
+
+## Optional UDP port reservation
+
+`ReserveUDPPort` defaults to `false` for both TCP tunnels and direct UDP.
+Disabling it binds no host UDP reservation socket; PCAP still captures and injects
+packets. Device selection and dialing never enable reservation automatically.
+
+Enabling it binds a normal host UDP socket to the local address/port, preventing
+ordinary bind collisions and host closed-port ICMP replies. That socket appears
+in tools such as `ss -uan` and can be attributed to the process with `ss -uanp`
+when permitted. Without reservation, other applications can bind the port and
+the host may generate ICMP port-unreachable replies. Reservation sockets do not
+perform application packet I/O.
+
+## MTU and network scope
+
+| Mode       | MTU configuration                                                   | Maximum at physical MTU 1500  |
+| ---------- | ------------------------------------------------------------------- | ----------------------------- |
+| Direct UDP | `UDPConfig.MTU`: physical IPv4 MTU cap; zero uses interface MTU     | 1472-byte application payload |
+| TCP tunnel | `PCAPConfig.MTU` and `Config.MTU`: matching inner MTU; default 1200 | 1472-byte inner IPv4 packet   |
+
+IPv4 and UDP headers consume 28 bytes. Oversized direct writes return
+`ErrDatagramTooLarge`. Choose MTUs suitable for the whole path: path MTU discovery
+and fragmentation/reassembly are not implemented. Incoming IP options count
+against the direct UDP MTU. Outer packets set Don't Fragment.
+
+Physical networking supports IPv4 unicast with untagged Ethernet egress. Capture
+accepts up to two 802.1Q/802.1ad VLAN tags. Wildcard binds, IPv6, multicast,
+broadcast, NAT traversal, encryption, and authentication are unsupported. Tuple
+filtering does not authenticate peers. The package does not change firewall
+rules or install host routes.
+
+## Deadlines, shutdown, and errors
+
+Direct UDP errors wrap `net.ErrClosed` for closed operations and
+`os.ErrDeadlineExceeded` for timeouts. Terminal capture/injection failures close
+the endpoint; `Err()` and `Close()` preserve terminal and cleanup causes.
+
+TCP worker failure rejects new operations, cancels pending handshakes, and closes
+existing endpoints. `VirtualStack.Close()` waits for gVisor and transport cleanup;
+`VirtualStack.Err()` reports errors. Normal shutdown cancellation is not a failure.
+
+Receive loops check cancellation between native reads, using a 100 ms capture
+timeout. Native route/injection calls cannot be interrupted and a stalled driver
+can delay shutdown. Handles remain open until active native operations finish.
+
+## Build and test
 
 ```sh
 go build ./...
@@ -28,269 +194,40 @@ go test -race -timeout=30s ./...
 go vet ./...
 ```
 
+The suite covers wire parsing/checksums, device selection, ownership, deadlines,
+MTUs, failures, and closure. Simulated Ethernet integration tests use real BPF
+filtering and serialization for TCP tunnel and direct UDP echo, with reservation
+both enabled and disabled. The loopback socket reservation test skips on explicit
+socket-permission errors.
 
-`pcapnet` runs a gVisor TCP/IPv4 stack and carries its packets through a
-`PacketTransport`. `PCAPTransport` sends and captures Ethernet frames using
-`gopacket/pcap`. Each outer IPv4/UDP datagram contains one complete inner IPv4
-packet. `MemoryTransport` provides the same packet interface for local testing.
+### Live capture tests
 
-```text
-application net.Conn
-  → gVisor TCP / virtual IPv4
-  → packet bridge
-  → Ethernet / physical IPv4 / UDP / inner IPv4 packet
-  → peer PCAP transport and bridge
-  → peer gVisor TCP / application
-```
+[Live tests](pcap_live_test.go) require the `pcaplive` build tag, `PCAPNET_LIVE=1`,
+configured Ethernet peers, and capture/injection privileges. Without opt-in they
+skip. Enabled tests fail on invalid settings or setup errors.
 
-`pcapconn` sends TCP/IP packets directly over Ethernet using the host identity.
-This package instead connects two independent virtual endpoints through UDP.
-Virtual IPs do not need to be assigned to host interfaces or routed by the host;
-gVisor routes only its configured peer through its own channel endpoint. The host's physical
-route determines the capture interface, physical source address, and next hop.
+| Variable                                        | Purpose                                               |
+| ----------------------------------------------- | ----------------------------------------------------- |
+| `PCAPNET_DEVICE`                                | Optional capture device override                      |
+| `PCAPNET_LOCAL_PORT`, `PCAPNET_PEER`            | Local UDP port and physical peer IPv4:port            |
+| `PCAPNET_VIRTUAL_IP`, `PCAPNET_PEER_VIRTUAL_IP` | Virtual addresses for TCP/shared test settings        |
+| `PCAPNET_ROLE`                                  | `server` or `client`                                  |
+| `PCAPNET_RESERVE_UDP`                           | Optional boolean; default false                       |
+| `PCAPNET_MTU`                                   | Optional tunnel inner MTU; default 1200               |
+| `PCAPNET_UDP_MODE`                              | Direct UDP test backend: `pcap` (default) or `kernel` |
 
-## Requirements and scope
+Start the server before the client, using reciprocal endpoint settings on two
+hosts or network namespaces. Select one of these tests with `-run`:
 
-Build with the Go version in the repository's `go.mod`, CGO enabled, a C compiler,
-and libpcap development headers/libraries. Runtime capture and injection require
-an Ethernet capture device and privileges granted by the platform's capture
-driver. Linux live-test instructions below use root inside isolated namespaces.
-Capture names that differ from OS interface names are matched using the route
-source address; other platforms and capture drivers still need live validation.
-
-The initial transport supports a fixed physical IPv4 peer and inner IPv4 TCP.
-It has no encryption, authentication, peer discovery, keepalive, NAT traversal,
-outer fragment reassembly, or path MTU discovery. Tuple filtering does not
-establish peer identity. Traffic remains subject to the host/network firewall.
-The package does not change firewall rules or install host routes.
-
-Ingress supports Ethernet frames with zero, one, or two 802.1Q/802.1ad VLAN tags.
-Egress generates untagged Ethernet frames. Loopback/non-Ethernet devices are not
-supported. Physical routes and next-hop MACs are resolved at setup; route or
-neighbor changes require recreating the transport.
-
-## Configure both endpoints
-
-For two hosts with physical addresses `192.0.2.1` and `192.0.2.2`, configure:
-
-| Setting | Endpoint A | Endpoint B |
-| --- | --- | --- |
-| Capture device | A's route-selected Ethernet device | B's route-selected Ethernet device |
-| Outer local UDP port | `45000` | `45001` |
-| Outer peer | `192.0.2.2:45001` | `192.0.2.1:45000` |
-| Virtual IP | `10.200.0.1` | `10.200.0.2` |
-| Peer virtual IP | `10.200.0.2` | `10.200.0.1` |
-| Inner MTU | `1200` | `1200` |
-
-The physical source IP is selected by the host route to the physical peer. The
-configured capture device must match that route. ARP resolves either the peer
-itself for a direct route or the gateway for a routed peer, with a five-second
-setup timeout bounded by the caller's context.
-
-Use `PCAPConfig` for the physical endpoint and `Config` for gVisor. The legacy
-`Config.DeviceName` field is retained for compatibility and is not used to open
-PCAP; set `PCAPConfig.DeviceName` instead.
-
-`PCAPConfig.MTU` and `Config.MTU` both default to `1200` when zero and must agree
-at attachment. Inner MTU includes the entire inner IP header and payload. With
-standard outer IPv4/UDP headers:
-
-```text
-maximum inner MTU = physical IP MTU - 20 - 8
-1500-byte physical MTU → at most 1472 inner bytes
-```
-
-The package checks the local interface MTU. Choose an inner MTU suitable for the
-whole path; smaller downstream MTUs are not discovered automatically. Outer
-IPv4 packets set Don't Fragment, and outer fragments are rejected on receive.
-
-## Optional host UDP reservation
-
-`PCAPConfig.ReserveUDPPort` defaults to `false`. When true, setup binds a normal
-host UDP socket to the route source IP and `LocalPort`. This prevents ordinary
-bind collisions and host closed-port ICMP responses. It is visible in tools
-such as `ss -uan`, with process attribution from `ss -uanp` when permitted.
-The reservation socket is held until transport closure and does not perform
-tunnel packet I/O.
-
-When false, no reservation socket is created. Other host applications may bind
-the port, and the host may emit ICMP port-unreachable replies to incoming UDP.
-PCAP still performs capture/injection. A future Cobra command can assign its
-boolean flag directly to `ReserveUDPPort`; this package adds no CLI flags.
-
-## Construct and use a stack
-
-See [example_test.go](example_test.go) for a compiled example of both configurations
-and ownership handling. The core sequence is:
-
-```go
-transport, err := pcapnet.NewPCAPTransport(ctx, physicalConfig)
-if err != nil {
-    return err
-}
-v, err := pcapnet.NewVirtualStackWithTransport(virtualConfig, transport)
-if err != nil {
-    // Failed attachment leaves ownership with the caller.
-    return errors.Join(err, transport.Close())
-}
-defer v.Close() // Owns the transport and both packet workers.
-```
-
-On one endpoint, create a virtual TCP listener with `v.Listen(6767)` and accept
-connections. On its peer, use `v.Dial(ctx, "10.200.0.2", 6767)`. These return
-standard `net.Listener` and `net.Conn` interfaces with connection deadlines.
-Dial contexts affect the handshake, not the established connection's lifetime.
-The `NewPCAPTransport` context affects setup, not the resulting transport.
-
-After successful attachment, do not share the transport with another stack,
-close it separately, or read/write `v.Link` directly. `NewVirtualStack` remains
-available for callers that manage their own channel endpoint packet processing.
-
-## Shutdown and errors
-
-Packet worker failure records its cause, rejects new dial/listen operations,
-cancels pending handshakes, and closes existing TCP endpoints automatically.
-`Close()` waits for worker and gVisor cleanup and retains its existing void
-signature. Query `Err()` for the worker failure and any resource cleanup errors:
-
-```go
-v.Close()
-if err := v.Err(); err != nil {
-    return err
-}
-```
-
-`Err()` is safe during shutdown; calling `Close()` first obtains the completed
-cleanup result. Normal shutdown cancellation is not an error. Immediate
-transport failure can begin shutdown before the attachment constructor returns.
-
-Stack closure stops workers immediately; keep the stack alive while application
-protocols finish exchanging data. It does not promise to drain queued TCP data
-or finish graceful TCP teardown before stopping the transport.
-
-PCAP receive calls use a 100 ms capture timeout and check cancellation between
-native calls. Injection already executing in a native driver cannot be canceled.
-A stalled driver can delay shutdown; live tests must verify the target driver's
-behavior. Handles are never freed while transport I/O still uses them.
-
-## Automated tests
-
-From the module root:
+- `TestLivePCAPTCPEcho`: 64 KiB echo through the TCP tunnel.
+- `TestLivePCAPReceiveCancellation`: real-driver receive cancellation and closure.
+- `TestLiveDirectUDPEcho`: direct UDP echo; select different backends on the two
+  hosts to check interoperability with ordinary kernel UDP sockets. Shared test
+  settings still require virtual addresses, although direct UDP does not use them.
 
 ```sh
-go test -race -timeout=30s ./...
-go vet ./...
+go test -tags=pcaplive -run '^TestLivePCAPTCPEcho$' -v -timeout=40s .
 ```
 
-The normal suite includes a full two-stack tunnel test with simulated Ethernet
-capture/injection, real gopacket serialization, real libpcap BPF filtering, and
-both production bridges. It exchanges 1-byte, 1201-byte, and 128 KiB messages,
-checks MTU limits and unrelated-traffic filtering, and covers reservation on/off.
-Unit tests cover malformed packets, checksums, cancellation, ownership, failure
-propagation, cleanup errors, and blocked TCP operations.
-
-If the environment disallows socket creation, only the real loopback reservation
-bind/collision test skips on permission errors. These tests do not establish
-that a live capture driver works.
-
-## Opt-in live tests
-
-Live tests have build tag `pcaplive` and additionally require `PCAPNET_LIVE=1`.
-Without that variable they skip, even when compiled with the tag. Once enabled,
-invalid settings or unavailable devices fail rather than silently skipping.
-
-| Variable | Purpose |
-| --- | --- |
-| `PCAPNET_DEVICE` | Physical Ethernet capture device |
-| `PCAPNET_LOCAL_PORT` | Nonzero outer UDP local port |
-| `PCAPNET_PEER` | Peer physical IPv4 address and UDP port |
-| `PCAPNET_VIRTUAL_IP` | Local gVisor IPv4 address |
-| `PCAPNET_PEER_VIRTUAL_IP` | Peer gVisor IPv4 address |
-| `PCAPNET_ROLE` | `server` or `client` for the echo test |
-| `PCAPNET_RESERVE_UDP` | Optional boolean, default `false` |
-| `PCAPNET_MTU` | Optional inner MTU, default `1200` |
-
-`TestLivePCAPTCPEcho` runs on two hosts or separate network namespaces. Start the
-server first and wait for its listening log. The client verifies a 64 KiB echo.
-The server can remain alive until its 20-second deadline if the client closes
-its stack before TCP FIN reaches the server; that idle timeout is accepted only
-when the expected number of bytes has been echoed.
-
-`TestLivePCAPReceiveCancellation` checks cancellation with the selected real
-capture driver, then closes the transport during an active capture call and
-requires the pending receive to unblock. Run it without concurrent echo traffic.
-Both tests need an outer test timeout to bound misbehaving native drivers.
-
-### Linux namespace example
-
-Build a test executable from the module root before changing network namespaces:
-
-```sh
-go test -tags=pcaplive -c -o /tmp/pcapnet-live.test .
-```
-
-Create two namespaces and a dedicated Ethernet link on a test machine:
-
-```sh
-sudo ip netns add pcapnet-a
-sudo ip netns add pcapnet-b
-sudo ip link add pcap-a type veth peer name pcap-b
-sudo ip link set pcap-a netns pcapnet-a
-sudo ip link set pcap-b netns pcapnet-b
-sudo ip -n pcapnet-a addr add 192.0.2.1/24 dev pcap-a
-sudo ip -n pcapnet-b addr add 192.0.2.2/24 dev pcap-b
-sudo ip -n pcapnet-a link set lo up
-sudo ip -n pcapnet-b link set lo up
-sudo ip -n pcapnet-a link set pcap-a up
-sudo ip -n pcapnet-b link set pcap-b up
-```
-
-In the server terminal:
-
-```sh
-sudo ip netns exec pcapnet-b env \
-  PCAPNET_LIVE=1 PCAPNET_ROLE=server PCAPNET_DEVICE=pcap-b \
-  PCAPNET_LOCAL_PORT=45001 PCAPNET_PEER=192.0.2.1:45000 \
-  PCAPNET_VIRTUAL_IP=10.200.0.2 PCAPNET_PEER_VIRTUAL_IP=10.200.0.1 \
-  PCAPNET_RESERVE_UDP=true \
-  /tmp/pcapnet-live.test -test.v -test.timeout=40s \
-  -test.run '^TestLivePCAPTCPEcho$'
-```
-
-After the listening log, run in the client terminal:
-
-```sh
-sudo ip netns exec pcapnet-a env \
-  PCAPNET_LIVE=1 PCAPNET_ROLE=client PCAPNET_DEVICE=pcap-a \
-  PCAPNET_LOCAL_PORT=45000 PCAPNET_PEER=192.0.2.2:45001 \
-  PCAPNET_VIRTUAL_IP=10.200.0.1 PCAPNET_PEER_VIRTUAL_IP=10.200.0.2 \
-  PCAPNET_RESERVE_UDP=true \
-  /tmp/pcapnet-live.test -test.v -test.timeout=40s \
-  -test.run '^TestLivePCAPTCPEcho$'
-```
-
-Repeat both commands with `PCAPNET_RESERVE_UDP=false` to check unreserved operation.
-Once echo testing stops, reuse either endpoint's environment with
-`-test.run '^TestLivePCAPReceiveCancellation$'` for the driver cancellation test.
-These commands can also be adapted to two real hosts by changing the capture
-names and physical endpoints to their route-selected Ethernet interfaces.
-
-After both test processes exit, remove the namespaces (which also removes their
-veth devices):
-
-```sh
-sudo ip netns del pcapnet-a
-sudo ip netns del pcapnet-b
-rm /tmp/pcapnet-live.test
-```
-
-The namespace commands are instructions for a privileged test environment;
-normal package tests do not create interfaces or modify network configuration.
-
-## Verification of this extraction
-
-The complete standalone module builds, its tests pass with the race detector,
-and `go vet` passes with the live-test build tag enabled. The opt-in live tests
-compile but were not run against a real capture device. The real UDP socket
-reservation test skips in the restricted extraction environment. No sibling
-package or missing legacy isolator implementation is needed by this module.
+Run driver cancellation tests separately from echo traffic. Simulated tests do
+not establish live driver compatibility.
