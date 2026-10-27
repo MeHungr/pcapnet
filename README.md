@@ -166,5 +166,4 @@ The suite includes simulated Ethernet, allocation, concurrent TCP, certificate
 verification, replay/tampering, cancellation, and cleanup regressions.
 [Testing documentation](docs/testing.md) covers optional live capture tests and
 their environment variables. Live two-host driver behavior requires separate
-verification. See the [maintenance review](docs/maintenance-review.md) for the
-resource-handling changes and validation scope.
+verification.
