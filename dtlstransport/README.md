@@ -4,9 +4,10 @@ Optional DTLS 1.2 and mutual-DTLS adapter for
 [pcapnet / PCAT](../README.md), built on
 [Pion DTLS v3.1.15](https://github.com/pion/dtls/tree/v3.1.15).
 
-The adapter encrypts complete PCAT session messages: allocation fields, tokens,
-keepalives, and inner TCP/IP packets. Core pcapnet does not import DTLS. The
-importing application chooses the endpoint and supplies credentials and policy.
+The adapter encrypts arbitrary application datagrams without gVisor or PCAT
+allocation. It can also carry complete PCAT session messages: allocation fields,
+tokens, keepalives, and inner TCP/IP packets. Core pcapnet does not import DTLS.
+The importing application chooses the endpoint and supplies credentials and policy.
 
 ## Features
 
@@ -21,7 +22,17 @@ importing application chooses the endpoint and supplies credentials and policy.
 1. Open PCAP UDP with `pcapnet.DialUDP` or `pcapnet.ListenUDP`.
 2. Wrap it with `pcapnet.NewPlainUDPEndpoint` for raw datagram delivery.
 3. Use `dtlstransport.Dial` or `dtlstransport.Listen` to create a secure endpoint.
-4. Pass it to `pcapnet.DialStack` or `pcapnet.NewTCPServer`.
+4. Exchange application datagrams with `SendTo(ctx, body, peer)` and
+   `ReceiveFrom(ctx)`, or pass it to `pcapnet.DialStack` / `pcapnet.NewTCPServer`
+   for allocated TCP.
+
+For direct datagrams, the client sends to `endpoint.Peer()`. The server replies
+using the complete `Peer` returned by `ReceiveFrom`, preserving the authenticated
+connection identity. Close the secure endpoint to release its raw UDP endpoint.
+No second listener is needed to receive replies. See the runnable
+[UDP client](../examples/udp-client/secure.go) and
+[UDP server](../examples/udp-server/secure.go), and the
+[direct UDP DTLS commands](../examples/README.md#dtls-for-direct-udp).
 
 Clients use the authenticated handle returned by `endpoint.Peer()` when calling
 `DialStack`; a physical address alone cannot identify a secure connection.
@@ -75,7 +86,8 @@ is application-owned and is not erased by closing the transport.
 | DTLS: server authenticated, clients anonymous | [DTLS profile](../docs/protocol/dtls.md) |
 | mDTLS: server and clients authenticated | [mDTLS profile](../docs/protocol/mdtls.md) |
 
-Both use the `PCDT` routing envelope and encrypted `PCAT` session messages.
+Both use the `PCDT` routing envelope. Direct use encrypts application datagrams;
+PCAT profiles encrypt session messages.
 This extra envelope separates simultaneous initial handshakes at the same UDP
 address; it is not a credential. Both peers must implement it, so a bare OpenSSL
 or DTLS socket is not directly compatible. Routing IDs, outer metadata, and some
@@ -84,8 +96,20 @@ rebinding are not supported.
 
 The adapter subtracts 61 bytes from the raw datagram capacity for routing and
 DTLS protection, and caps encrypted datagrams at the library's 8192-byte receive
-limit. The session layer subtracts another 24 bytes. At physical IPv4 MTU 1500,
+limit. When used with PCAT, the session layer subtracts another 24 bytes. At physical IPv4 MTU 1500,
 the maximum inner packet is 1387 bytes; the examples use 1200.
+
+An optional `UDPConfig.MagicHeader` precedes the routing envelope on the wire:
+
+```text
+UDP payload: [ optional magic ][ PCDT envelope ][ DTLS-protected application datagram ]
+```
+
+Both endpoints must configure the same magic header. It remains outside DTLS
+encryption; it provides filtering, not authentication. With no additional magic,
+`CaptureUDP` can select secure traffic using the `PCDT` prefix. Direct DTLS has
+no PCAT assignment or session header; use `Endpoint.MaxDatagramSize()` for its
+application payload limit.
 
 ## Tests
 
@@ -94,6 +118,7 @@ go test -race -timeout=30s ./dtlstransport
 ```
 
 Tests use in-memory datagram delivery and temporary test identities; they cover
-concurrent allocated TCP, invalid credentials, authorization, replay/tampering,
+standalone DTLS/mDTLS datagram echo, concurrent allocated TCP, invalid credentials,
+authorization, replay/tampering,
 reconnect isolation, jumbo MTUs, cancellation, rollback, and shutdown. They do not
 replace live PCAP interoperability testing.

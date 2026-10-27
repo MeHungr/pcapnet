@@ -1,6 +1,7 @@
 // Package dtlstransport provides an optional DTLS 1.2 adapter for pcapnet.
 // It uses Pion DTLS with certificate authentication and AES-128-GCM. Applications
-// supply certificates, trust roots, and authorization policy; pcapnet's allocation
+// exchange arbitrary datagrams without a virtual stack and supply certificates,
+// trust roots, and authorization policy; pcapnet's allocation
 // and TCP code do not depend on DTLS. Plain and secure endpoints are explicit
 // alternatives: there is no opportunistic downgrade to plaintext.
 package dtlstransport

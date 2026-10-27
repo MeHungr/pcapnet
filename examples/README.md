@@ -5,7 +5,7 @@ Runnable capture, clients, and echo servers for pcapnet and the PCAT protocol.
 | Program | Connection type |
 | --- | --- |
 | [udp-capture](udp-capture/main.go) | Read-only UDP prefix capture across all local ports |
-| [udp-client](udp-client/main.go), [udp-server](udp-server/main.go) | Direct physical UDP; ordinary UDP peers work |
+| [udp-client](udp-client/main.go), [udp-server](udp-server/main.go) | Direct UDP with optional magic framing or DTLS/mDTLS |
 | [tcp-client](tcp-client/main.go), [tcp-server](tcp-server/main.go) | PCAT TCP with plain, DTLS, or mDTLS channels |
 
 ## Build and prerequisites
@@ -64,6 +64,38 @@ bodies, with the header removed. The client reads replies on the same connection
 the server replies to the address returned by `ReadFrom`. Header bytes count
 toward the MTU, but are excluded from read/write byte counts. The Go API accepts
 arbitrary binary headers through `UDPConfig.MagicHeader`; empty disables framing.
+
+## DTLS for direct UDP
+
+```sh
+# Server host
+SERVER_IP=192.0.2.2
+SERVER_CERT=server.pem
+SERVER_KEY=server-key.pem
+sudo /tmp/pcapnet-udp-server -local "${SERVER_IP}:45001" -dtls \
+  -cert "$SERVER_CERT" -key "$SERVER_KEY"
+```
+
+```sh
+# Client host
+SERVER_IP=192.0.2.2
+SERVER_NAME=datagrams.example
+SERVER_CA=server-ca.pem
+sudo /tmp/pcapnet-udp-client -peer "${SERVER_IP}:45001" -dtls \
+  -ca "$SERVER_CA" -server-name "$SERVER_NAME" -message hello
+```
+
+For mDTLS, add `-require-client-cert -ca "$CLIENT_CA"` on the server and
+`-cert "$CLIENT_CERT" -key "$CLIENT_KEY"` on the client, using operator-supplied
+PEM credentials. The client always verifies the server. Certificate flags require
+`-dtls`; a failed secure setup never retries as plaintext.
+
+This exchanges encrypted datagrams directly, without gVisor or PCAT allocation.
+Both programs use the repository's DTLS adapter and `PCDT` routing envelope;
+bare DTLS sockets are not wire-compatible. Optional `-magic` works on both ends
+and adds a matching prefix **outside** encryption. Without it, secure traffic
+starts with `PCDT`. Applications call `SendTo` / `ReceiveFrom` on the secure
+endpoint, preserving the full returned peer handle when replying.
 
 ## Read-only UDP capture
 

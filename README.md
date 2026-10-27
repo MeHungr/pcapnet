@@ -12,7 +12,7 @@ DTLS, or mutually authenticated DTLS (mDTLS). Direct UDP needs no gVisor stack.
 - `net.Conn` / `net.PacketConn` for direct physical UDP, with optional magic-header framing.
 - Read-only UDP capture across all ports with configurable magic-header matching.
 - TCP `Dial` / `Listen`, automatic client allocation, and concurrent peers.
-- Optional [DTLS adapter](dtlstransport/README.md) using Pion DTLS 1.2.
+- Optional [DTLS adapter](dtlstransport/README.md) for direct datagrams or PCAT, using Pion DTLS 1.2.
 - Configurable virtual subnets, MTUs, deadlines, and session limits.
 - Automatic Ethernet-device selection and optional host UDP port reservation.
 - Pluggable packet/datagram transports and an in-memory backend for tests.
@@ -93,6 +93,13 @@ use the same prefix; `UDPConn.MaxDatagramSize()` accounts for its MTU overhead.
 The dialed connection receives replies on its source port without a second
 listener. Servers use `ReadFrom` and reply to the returned address with `WriteTo`.
 See the [magic-header round trip](examples/README.md#magic-header-udp).
+
+For encrypted direct datagrams, wrap UDP with `NewPlainUDPEndpoint` and then
+`dtlstransport.Dial` / `Listen`. Exchange bodies with `SendTo` / `ReceiveFrom`;
+no virtual stack or allocation is required. The
+[UDP DTLS examples](examples/README.md#dtls-for-direct-udp) support server
+certificate verification and optional required client certificates (mDTLS).
+The importing application supplies credentials and authorization policy.
 
 `CaptureUDP` takes `UDPCaptureConfig{LocalIP, DeviceName, MagicHeader}`. The
 nonempty binary header matches at payload byte zero; `Receive(ctx)` returns the

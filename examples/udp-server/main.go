@@ -46,6 +46,12 @@ func run() (resultErr error) {
 		ReserveUDPPort: *reservePort,
 		MagicHeader:    []byte(*magicHeader),
 	}
+	if *useDTLS {
+		return secureEcho(ctx, setupCtx, cfg)
+	}
+	if *certFile != "" || *keyFile != "" || *caFile != "" || *requireClientCert {
+		return fmt.Errorf("certificate flags require -dtls")
+	}
 	listener, err := pcapnet.ListenUDP(setupCtx, cfg)
 	if err != nil {
 		return err

@@ -46,6 +46,12 @@ func run() (resultErr error) {
 		ReserveUDPPort: *reservePort,
 		MagicHeader:    []byte(*magicHeader),
 	}
+	if *useDTLS {
+		return secureEcho(ctx, cfg, peer)
+	}
+	if *certFile != "" || *keyFile != "" || *caFile != "" || *serverName != "" {
+		return fmt.Errorf("certificate flags require -dtls")
+	}
 	conn, err := pcapnet.DialUDP(ctx, cfg, peer)
 	if err != nil {
 		return err
