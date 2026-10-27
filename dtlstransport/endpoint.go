@@ -253,7 +253,12 @@ func (e *Endpoint) authorize(ctx context.Context, p *connection, callback func(c
 	if err != nil {
 		return err
 	}
-	info := PeerInfo{Peer: pcapnet.Peer{AddrPort: p.packets.key.peer.AddrPort, ConnectionID: [16]byte(id)}}
+	// Preserve local delivery metadata so an all-port raw endpoint can select
+	// the contacted port for replies. routeKey already includes the full raw
+	// Peer, keeping the same remote endpoint isolated across local ports.
+	peer := p.packets.key.peer
+	peer.ConnectionID = [16]byte(id)
+	info := PeerInfo{Peer: peer}
 	for _, der := range state.PeerCertificates {
 		cert, err := x509.ParseCertificate(der)
 		if err != nil {

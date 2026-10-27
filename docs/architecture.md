@@ -19,7 +19,9 @@ flowchart TD
 
 `PacketTransport` moves complete inner IPv4 packets. `DatagramEndpoint` moves
 channel messages and associates them with a `Peer`. A plain Peer has only a
-physical UDP endpoint. A secure Peer also has a local, opaque connection ID,
+physical UDP endpoint. All-port capture also supplies `Peer.LocalAddrPort`, the
+contacted local endpoint used to select reply source ports. A secure Peer has a
+local, opaque connection ID,
 independent of the public wire routing ID and the allocator's session token.
 
 The server has one virtual stack and TCP listener. Allocated addresses map to
@@ -67,12 +69,21 @@ its own source port rather than mutating shared connection configuration. Close
 joins active sends and capture before releasing native resources. No per-port
 listener or reservation is created, and host ICMP behavior is unchanged.
 
+`NewPlainUDPCaptureEndpoint` adapts that server to `DatagramEndpoint` and owns it
+on success. It supplies the local destination tuple in `Peer.LocalAddrPort` and
+requires that tuple on sends. The DTLS adapter keys raw routes by the entire peer
+plus routing ID, preserves the local tuple in authenticated handles, and sends
+handshake/application records through that route. This supports DTLS/mDTLS on all
+ports with the same capture handle. A modified authenticated handle cannot select
+a different local port. Local delivery metadata remains process-local; no wire
+format or certificate semantics change.
+
 ## Ownership
 
 | Constructor | Success | Failure |
 | --- | --- | --- |
 | `ListenUDPCapture` | Server owns its capture/injection handle | Roll back all acquired resources |
-| `NewPlainUDPEndpoint` | Owns supplied UDPConn | Caller retains supplied connection |
+| `NewPlainUDPEndpoint` / `NewPlainUDPCaptureEndpoint` | Own supplied UDPConn / capture server | Caller retains supplied endpoint |
 | `NewServerTransport` / `AllocateClient` | Own supplied endpoint | Caller retains endpoint |
 | `NewVirtualStackWithTransport` | Stack owns transport | Caller retains transport |
 | `DialStack` | Stack owns endpoint through its client transport | Endpoint is closed, including validation failures |

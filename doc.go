@@ -8,6 +8,8 @@
 // local IPv4 address, without reserving ports or providing a send operation.
 // ListenUDPCapture provides an all-port server that removes magic headers on
 // receive and restores them on replies from the port each client contacted.
+// NewPlainUDPCaptureEndpoint adapts that server for optional DTLS/mDTLS, retaining
+// the contacted local address in Peer.LocalAddrPort for secure replies.
 //
 // PCAT (Packet Capture and Allocation Transport) carries TCP over UDP sessions.
 // TCP uses a gVisor stack with pluggable packet transport. DialPCAPStack

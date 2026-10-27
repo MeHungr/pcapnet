@@ -92,7 +92,45 @@ A nonempty header is required; mismatched traffic and zero-port tuples are ignor
 The server uses one persistent capture/injection handle, with bounded queues and
 route/ARP-based replies. It binds no sockets and leaves host UDP delivery and
 possible ICMP port-unreachable responses unchanged. This is unencrypted header
-framing; the fixed-port examples below demonstrate DTLS/mDTLS.
+framing by default. Enable DTLS/mDTLS as shown below.
+
+### Mutual DTLS on all ports
+
+```sh
+# Server host
+SERVER_IP=192.0.2.2
+MAGIC=MYPROTO
+SERVER_CERT=server.pem
+SERVER_KEY=server-key.pem
+CLIENT_CA=client-ca.pem
+sudo /tmp/pcapnet-udp-capture-server -local-ip "$SERVER_IP" -magic "$MAGIC" \
+  -dtls -cert "$SERVER_CERT" -key "$SERVER_KEY" \
+  -require-client-cert -ca "$CLIENT_CA"
+```
+
+```sh
+# Client host: any nonzero destination port is accepted.
+SERVER_IP=192.0.2.2
+MAGIC=MYPROTO
+SERVER_NAME=datagrams.example
+SERVER_CA=server-ca.pem
+CLIENT_CERT=client.pem
+CLIENT_KEY=client-key.pem
+sudo /tmp/pcapnet-udp-client -peer "${SERVER_IP}:55002" -magic "$MAGIC" \
+  -dtls -ca "$SERVER_CA" -server-name "$SERVER_NAME" \
+  -cert "$CLIENT_CERT" -key "$CLIENT_KEY" -message hello
+```
+
+The server verifies client certificates before delivering any application body;
+the client verifies the server's chain and name. The contacted port is preserved
+through handshake and encrypted replies, with one shared capture handle.
+Server-authenticated DTLS is also available: omit server `-require-client-cert`
+and `-ca`, and omit client `-cert` / `-key`. Certificate flags require `-dtls`.
+
+Both peers must use the same `-magic` prefix. That prefix is outside encryption,
+followed by the `PCDT` routing envelope and protected DTLS records. Plain matching
+datagrams are not echoed in secure mode, and failed handshakes never fall back
+to plaintext.
 
 ## DTLS for direct UDP
 

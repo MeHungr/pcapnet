@@ -37,6 +37,7 @@ type hub struct {
 	tamperNext bool
 }
 type rawEndpoint struct {
+	capture          bool // Test-only all-port receiver; replies use Peer.LocalAddrPort.
 	hub              *hub
 	addr             pcapnet.Peer
 	incoming         chan wirePacket
@@ -90,10 +91,18 @@ func (e *rawEndpoint) SendTo(ctx context.Context, b []byte, to pcapnet.Peer) err
 		b[len(b)-1] ^= 1
 		e.hub.tamperNext = false
 	}
-	packet := wirePacket{b, e.addr, to}
+	from := e.addr
+	if e.capture {
+		if !to.LocalAddrPort.IsValid() || to.LocalAddrPort.Addr() != e.addr.Addr() || to.LocalAddrPort.Port() == 0 {
+			return fmt.Errorf("missing local reply tuple")
+		}
+		from = pcapnet.Peer{AddrPort: to.LocalAddrPort}
+		to.LocalAddrPort = netip.AddrPort{}
+	}
+	packet := wirePacket{b, from, to}
 	e.hub.wire = append(e.hub.wire, packet)
 	for _, target := range e.hub.endpoints {
-		if target.addr == to {
+		if target.addr == to || (target.capture && target.addr.Addr() == to.Addr()) {
 			select {
 			case <-target.done:
 			case target.incoming <- packet:
@@ -110,7 +119,11 @@ func (e *rawEndpoint) ReceiveFrom(ctx context.Context) ([]byte, pcapnet.Peer, er
 	case <-e.done:
 		return nil, pcapnet.Peer{}, net.ErrClosed
 	case p := <-e.incoming:
-		return append([]byte(nil), p.data...), p.from, nil
+		peer := p.from
+		if e.capture {
+			peer.LocalAddrPort = p.to.AddrPort
+		}
+		return append([]byte(nil), p.data...), peer, nil
 	}
 }
 

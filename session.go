@@ -10,9 +10,13 @@ import (
 // Plain UDP uses a zero ConnectionID. Secure adapters assign a fresh local ID
 // after authentication, so reconnects and clients sharing an address stay distinct.
 // ConnectionID is not transmitted by the allocation protocol.
+// LocalAddrPort is optional local delivery metadata, supplied by all-port capture
+// endpoints to select the reply source. Preserve the entire Peer when replying;
+// neither this local tuple nor ConnectionID is a wire-format field.
 type Peer struct {
 	netip.AddrPort
-	ConnectionID [16]byte
+	LocalAddrPort netip.AddrPort
+	ConnectionID  [16]byte
 }
 
 // DatagramEndpoint is the boundary between tunnel sessions and packet delivery.
@@ -32,7 +36,8 @@ type DatagramEndpoint interface {
 }
 
 // PlainUDPEndpoint adapts PCAP UDP to the session layer without encryption or
-// authentication. Construct it with NewPlainUDPEndpoint; it owns the UDPConn.
+// authentication. Construct it with NewPlainUDPEndpoint or
+// NewPlainUDPCaptureEndpoint; it owns the underlying UDP resources.
 type PlainUDPEndpoint struct{ conn *UDPConn }
 
 // NewPlainUDPEndpoint transfers ownership of conn. conn may be connected for a
@@ -42,6 +47,18 @@ func NewPlainUDPEndpoint(conn *UDPConn) (*PlainUDPEndpoint, error) {
 		return nil, fmt.Errorf("UDP connection is required")
 	}
 	return &PlainUDPEndpoint{conn: conn}, nil
+}
+
+// NewPlainUDPCaptureEndpoint transfers capture-server ownership on success.
+// ReceiveFrom includes the contacted local address in Peer.LocalAddrPort, and
+// SendTo requires that tuple to select its reply source. This endpoint can be
+// wrapped by dtlstransport.Listen without creating a listener for each port.
+// Callers must stop using server directly after ownership transfers.
+func NewPlainUDPCaptureEndpoint(server *UDPCaptureServer) (*PlainUDPEndpoint, error) {
+	if server == nil || server.conn == nil {
+		return nil, fmt.Errorf("UDP capture server is required")
+	}
+	return &PlainUDPEndpoint{conn: server.conn}, nil
 }
 
 // MaxDatagramSize accounts for IPv4/UDP and optional UDP magic framing.
@@ -61,7 +78,18 @@ func (p *PlainUDPEndpoint) SendTo(ctx context.Context, data []byte, peer Peer) e
 	if p.conn.peer.IsValid() && peer.AddrPort != p.conn.peer {
 		return fmt.Errorf("endpoint peer mismatch")
 	}
-	_, err := p.conn.writeToContext(ctx, data, peer.AddrPort)
+	local := peer.LocalAddrPort
+	if p.conn.allPorts {
+		if !local.IsValid() || local.Addr() != p.conn.config.LocalIP || local.Port() == 0 {
+			return fmt.Errorf("capture endpoint requires the contacted local IPv4 address and port")
+		}
+	} else {
+		if local != (netip.AddrPort{}) && local != p.conn.resources.local {
+			return fmt.Errorf("endpoint local address mismatch")
+		}
+		local = p.conn.resources.local
+	}
+	_, err := p.conn.writeFromContext(ctx, data, local.Port(), peer.AddrPort)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -93,6 +121,10 @@ func (p *PlainUDPEndpoint) ReceiveFrom(parent context.Context) ([]byte, Peer, er
 		if ctx.Err() != nil {
 			return nil, Peer{}, udpContextError(ctx)
 		}
-		return append([]byte(nil), packet.Payload...), Peer{AddrPort: netip.AddrPortFrom(packet.SourceIP, packet.SourcePort)}, nil
+		peer := Peer{AddrPort: netip.AddrPortFrom(packet.SourceIP, packet.SourcePort)}
+		if p.conn.allPorts {
+			peer.LocalAddrPort = netip.AddrPortFrom(packet.DestinationIP, packet.DestinationPort)
+		}
+		return append([]byte(nil), packet.Payload...), peer, nil
 	}
 }

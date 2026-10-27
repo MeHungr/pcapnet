@@ -200,3 +200,61 @@ func TestUDPCaptureServerEthernetEcho(t *testing.T) {
 		})
 	}
 }
+
+// TestPlainUDPCaptureEndpoint verifies local reply metadata survives adaptation
+// into the datagram interface used by DTLS, without a per-peer tuple cache.
+func TestPlainUDPCaptureEndpoint(t *testing.T) {
+	f := newUDPFixture(t)
+	server := openCaptureServer(t, f, []byte("M"))
+	endpoint, err := NewPlainUDPCaptureEndpoint(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer endpoint.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for _, port := range []uint16{45001, 55002} {
+		wire, err := udpFrame(netip.MustParseAddrPort("192.0.2.1:45000"), netip.AddrPortFrom(f.config.LocalIP, port), net.HardwareAddr{2, 0, 0, 0, 0, 1}, net.HardwareAddr{2, 0, 0, 0, 0, 2}, []byte("Mrecord"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.feed(wire)
+		body, peer, err := endpoint.ReceiveFrom(ctx)
+		if err != nil || string(body) != "record" || peer.LocalAddrPort != netip.AddrPortFrom(f.config.LocalIP, port) || peer.ConnectionID != ([16]byte{}) {
+			t.Fatalf("metadata: %q %+v %v", body, peer, err)
+		}
+		if err := endpoint.SendTo(ctx, body, peer); err != nil {
+			t.Fatal(err)
+		}
+		reply, err := ParseUDPPacket(<-f.writes)
+		if err != nil || reply.SourcePort != port || reply.DestinationPort != 45000 || string(reply.Payload) != "Mrecord" {
+			t.Fatalf("wire reply: %+v %v", reply, err)
+		}
+		invalid := peer
+		invalid.LocalAddrPort = netip.AddrPort{}
+		if err := endpoint.SendTo(ctx, body, invalid); err == nil {
+			t.Fatal("missing local tuple accepted")
+		}
+		invalid.LocalAddrPort = netip.MustParseAddrPort("192.0.2.99:45001")
+		if err := endpoint.SendTo(ctx, body, invalid); err == nil {
+			t.Fatal("foreign local tuple accepted")
+		}
+		invalid = peer
+		invalid.ConnectionID[0] = 1
+		if err := endpoint.SendTo(ctx, body, invalid); err == nil {
+			t.Fatal("secure identity accepted by raw endpoint")
+		}
+	}
+	if len(f.writes) != 0 {
+		t.Fatal("invalid metadata injected traffic")
+	}
+	endpoint.Close()
+	if f.capture.closed.Load() != 1 {
+		t.Fatal("adapter did not release owned capture")
+	}
+	for _, invalid := range []*UDPCaptureServer{nil, {}} {
+		if _, err := NewPlainUDPCaptureEndpoint(invalid); err == nil {
+			t.Fatal("uninitialized capture accepted")
+		}
+	}
+}

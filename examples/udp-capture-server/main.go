@@ -45,6 +45,12 @@ func run() (resultErr error) {
 	setupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	cfg := pcapnet.UDPCaptureConfig{LocalIP: ip, DeviceName: *device, MagicHeader: header}
+	if *useDTLS {
+		return secureEcho(ctx, setupCtx, cfg)
+	}
+	if *certFile != "" || *keyFile != "" || *caFile != "" || *requireClientCert {
+		return fmt.Errorf("certificate flags require -dtls")
+	}
 	server, err := pcapnet.ListenUDPCapture(setupCtx, cfg)
 	if err != nil {
 		return err

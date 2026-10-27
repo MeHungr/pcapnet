@@ -42,6 +42,23 @@ initialization, and cleanup. Runnable commands are in the
 [DTLS](../examples/README.md#dtls) and [mDTLS](../examples/README.md#mutual-dtls)
 example guide.
 
+### All-port capture servers
+
+Open `pcapnet.ListenUDPCapture`, wrap it with
+`pcapnet.NewPlainUDPCaptureEndpoint`, and pass the result to `dtlstransport.Listen`.
+Set `ServerConfig.RequireClientCertificate` and `ClientCAs` for mDTLS. The raw
+adapter transfers ownership of the capture server; closing the secure endpoint
+closes all layers. See the [complete example](../examples/udp-capture-server/secure.go)
+and [mDTLS commands](../examples/README.md#mutual-dtls-on-all-ports).
+
+The capture endpoint includes the contacted local address in `Peer.LocalAddrPort`.
+DTLS route keys include that metadata, and authenticated handles preserve it.
+Reply with the complete handle from `ReceiveFrom`; this selects both the secure
+connection and the UDP source port. Clients sharing a physical source tuple can
+contact different local ports without crossing connections. No per-port listener
+or unbounded reply-address map is created. Local metadata does not add wire bytes
+or change the routing envelope. The configured magic prefix remains outside DTLS.
+
 ## Configuration
 
 | Setting | Meaning |

@@ -46,7 +46,10 @@ Byte 24
 
 The client MUST generate a fresh cryptographically random routing ID for each
 new connection. Both peers echo that ID in every envelope for the connection.
-A server routes by source physical endpoint and routing ID. Receivers MUST reject
+A server routes by source physical endpoint and routing ID. An all-port capture
+server also includes the contacted local endpoint in its route key, preserving
+that source port on replies. This is local delivery metadata and adds no wire
+fields. Receivers MUST reject
 unknown envelope versions, nonzero reserved bytes, and truncated records. Only
 an epoch-zero DTLS ClientHello can create a new server handshake slot; the DTLS
 implementation validates its full contents. Unknown IDs on a client are dropped.

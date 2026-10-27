@@ -22,6 +22,11 @@ tests verify binary prefixes, header-only datagrams, byte counts, MTU boundaries
 configuration/buffer ownership, and rejection of incorrect prefixes. Capture-server
 tests verify reversed reply tuples, concurrent source-port isolation, nonzero-port
 validation, cancellation, cleanup, and echo accepted by a dialed UDP client.
+Capture-endpoint tests verify local-port metadata reaches the DTLS boundary and
+selects the correct Ethernet reply tuple. DTLS tests run concurrent mDTLS
+handshakes from one physical source tuple to different local ports, reject
+missing/untrusted client certificates and altered peer handles, and verify
+header-only/maximum-size echoes and ownership cleanup using simulated delivery.
 The host socket reservation test skips explicit socket-permission errors.
 
 Resource regressions verify autonomous cleanup after terminal session failure,
