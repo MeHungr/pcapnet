@@ -12,14 +12,16 @@ go vet ./...
 
 The default suite requires no successful live capture. Tests cover frame lengths,
 checksums, BPF filtering, device selection, optional reservation, direct UDP,
-magic-header send/receive framing, passive capture,
+magic-header send/receive framing, passive capture, all-port capture replies,
 virtual TCP, PCAT allocation, and certificate-verified DTLS/mDTLS. In-memory
 networks exercise independent clients sharing a physical address, failed
 handshakes, authorization, replay/tampering, reconnection, deadlines, and shutdown.
 Simulated Ethernet integration tests use real serialization and compiled BPF,
 including magic-header echo with reservation both enabled and disabled. Framing
 tests verify binary prefixes, header-only datagrams, byte counts, MTU boundaries,
-configuration/buffer ownership, and rejection of incorrect prefixes.
+configuration/buffer ownership, and rejection of incorrect prefixes. Capture-server
+tests verify reversed reply tuples, concurrent source-port isolation, nonzero-port
+validation, cancellation, cleanup, and echo accepted by a dialed UDP client.
 The host socket reservation test skips explicit socket-permission errors.
 
 Resource regressions verify autonomous cleanup after terminal session failure,

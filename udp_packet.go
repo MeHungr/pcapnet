@@ -80,6 +80,13 @@ func (c *UDPConn) writeTo(payload []byte, peer netip.AddrPort) (int, error) {
 
 // writeToContext combines a tunnel operation lifetime with UDP shutdown and deadlines.
 func (c *UDPConn) writeToContext(parent context.Context, payload []byte, peer netip.AddrPort) (int, error) {
+	return c.writeFromContext(parent, payload, c.config.LocalPort, peer)
+}
+
+// writeFromContext permits a capture-server reply to use the received destination
+// port without mutating shared connection state. sendGate still serializes native
+// injection and MAC-cache access for replies to different peers and ports.
+func (c *UDPConn) writeFromContext(parent context.Context, payload []byte, sourcePort uint16, peer netip.AddrPort) (int, error) {
 	ctx, finish, err := c.operation(true)
 	if err != nil {
 		return 0, c.opError("write", err)
@@ -135,7 +142,8 @@ func (c *UDPConn) writeToContext(parent context.Context, payload []byte, peer ne
 		copy(wirePayload, c.config.MagicHeader)
 		copy(wirePayload[len(c.config.MagicHeader):], payload)
 	}
-	frame, err := udpFrame(c.resources.local, peer, c.resources.srcMAC, mac, wirePayload)
+	local := netip.AddrPortFrom(c.config.LocalIP, sourcePort)
+	frame, err := udpFrame(local, peer, c.resources.srcMAC, mac, wirePayload)
 	if err != nil {
 		return 0, c.opError("write", err)
 	}

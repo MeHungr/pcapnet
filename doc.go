@@ -6,6 +6,8 @@
 // matches/removes it on reads; a dialed connection also receives peer replies.
 // CaptureUDP observes a configurable UDP payload prefix across all ports at one
 // local IPv4 address, without reserving ports or providing a send operation.
+// ListenUDPCapture provides an all-port server that removes magic headers on
+// receive and restores them on replies from the port each client contacted.
 //
 // PCAT (Packet Capture and Allocation Transport) carries TCP over UDP sessions.
 // TCP uses a gVisor stack with pluggable packet transport. DialPCAPStack

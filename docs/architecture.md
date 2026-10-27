@@ -58,10 +58,20 @@ capture worker before freeing the native handle and drains queued references.
 Its setup context and per-receive contexts have separate lifetimes, like the
 other endpoint constructors. Host socket delivery and ICMP behavior are unchanged.
 
+`ListenUDPCapture` adds an all-port responder using the same capture configuration.
+Its `UDPCaptureServer.Receive` removes the header and preserves both addresses;
+`Reply(ctx, request, body)` restores framing and reverses the tuple. Only nonzero
+source/destination ports are delivered. One persistent handle, send gate, and
+bounded MAC cache are shared by replies to different ports. Each send supplies
+its own source port rather than mutating shared connection configuration. Close
+joins active sends and capture before releasing native resources. No per-port
+listener or reservation is created, and host ICMP behavior is unchanged.
+
 ## Ownership
 
 | Constructor | Success | Failure |
 | --- | --- | --- |
+| `ListenUDPCapture` | Server owns its capture/injection handle | Roll back all acquired resources |
 | `NewPlainUDPEndpoint` | Owns supplied UDPConn | Caller retains supplied connection |
 | `NewServerTransport` / `AllocateClient` | Own supplied endpoint | Caller retains endpoint |
 | `NewVirtualStackWithTransport` | Stack owns transport | Caller retains transport |

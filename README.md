@@ -10,7 +10,7 @@ DTLS, or mutually authenticated DTLS (mDTLS). Direct UDP needs no gVisor stack.
 ## Features
 
 - `net.Conn` / `net.PacketConn` for direct physical UDP, with optional magic-header framing.
-- Read-only UDP capture across all ports with configurable magic-header matching.
+- UDP magic-header capture across all ports, with read-only and replying APIs.
 - TCP `Dial` / `Listen`, automatic client allocation, and concurrent peers.
 - Optional [DTLS adapter](dtlstransport/README.md) for direct datagrams or PCAT, using Pion DTLS 1.2.
 - Configurable virtual subnets, MTUs, deadlines, and session limits.
@@ -62,12 +62,13 @@ Virtual addresses exist inside gVisor; no host addresses or routes are installed
 | [udp-client](examples/udp-client/main.go) | Send a physical UDP datagram and read its echo |
 | [udp-server](examples/udp-server/main.go) | Echo physical UDP datagrams |
 | [udp-capture](examples/udp-capture/main.go) | Observe a configurable UDP payload prefix across all ports |
+| [udp-capture-server](examples/udp-capture-server/main.go) | Echo matching datagrams from the port each client contacted |
 | [tcp-client](examples/tcp-client/main.go) | Allocate a PCAT address and exchange TCP data |
 | [tcp-server](examples/tcp-server/main.go) | Accept concurrent TCP connections from PCAT peers |
 
 See the [example guide](examples/README.md) for plain, DTLS, mDTLS, and concurrent
-client commands. All programs support `-h` and `-device`; clients and echo servers
-also support `-reserve-port`.
+client commands. All programs support `-h` and `-device`; fixed-port clients and
+servers also support `-reserve-port`.
 
 ## API overview
 
@@ -75,6 +76,7 @@ also support `-reserve-port`.
 | --- | --- |
 | `DialUDP` / `ListenUDP` | Direct physical UDP; interoperates with ordinary UDP peers |
 | `CaptureUDP` / `UDPCapture.Receive` | Read-only UDP prefix capture on all ports of one local IPv4 address |
+| `ListenUDPCapture` / `UDPCaptureServer` | Receive matching bodies across nonzero ports and reply from the contacted port |
 | `DialPCAPStack` / `ListenPCAPTCP` | Plain PCAT client stack / shared TCP server |
 | `DialStack` / `NewTCPServer` | Allocate and run TCP over a supplied plain or secure endpoint |
 | `DatagramEndpoint` / `Peer` | Message transport and per-connection identity |
@@ -107,6 +109,12 @@ full payload and both endpoint addresses. Close the capture when finished.
 Capture never binds ports or sends packets; host socket delivery and possible
 ICMP responses remain under host control. Its bounded queue drops new packets
 when full. See the [capture example](examples/udp-capture/main.go).
+
+`ListenUDPCapture` takes the same capture configuration and returns a server
+with `Receive(ctx)` and `Reply(ctx, request, body)`. Receive removes the header;
+Reply prepends it and reverses the request's address/port tuple. It uses one
+persistent capture/injection handle without reserving ports. See the
+[all-port echo example](examples/README.md#udp-capture-server).
 
 Successful stack attachment transfers transport ownership. `DialStack` owns its
 endpoint on entry and cleans it up on any failure. Close the owning stack/server

@@ -92,6 +92,7 @@ type UDPConn struct {
 	resources *pcapResources // Physical capture and optional reservation ownership
 	config    UDPConfig
 	peer      netip.AddrPort // Invalid for an unconnected listener
+	allPorts  bool           // Capture-server mode; replies select their source port
 	ops       udpSetupOps
 	inbox     chan *UDPPacket // Bounded datagrams; never closed during capture
 	ctx       context.Context // Endpoint lifetime, independent of setup context
@@ -111,7 +112,13 @@ type UDPConn struct {
 }
 
 // newUDPConn prepares native resources before publishing or starting capture.
-func newUDPConn(ctx context.Context, cfg UDPConfig, peer netip.AddrPort, ops udpSetupOps) (_ *UDPConn, resultErr error) {
+func newUDPConn(ctx context.Context, cfg UDPConfig, peer netip.AddrPort, ops udpSetupOps) (*UDPConn, error) {
+	return newUDPConnMode(ctx, cfg, peer, ops, false)
+}
+
+// newUDPConnMode shares setup and resource ownership with the capture server.
+// Only that server uses allPorts; ordinary UDP endpoints still require a port.
+func newUDPConnMode(ctx context.Context, cfg UDPConfig, peer netip.AddrPort, ops udpSetupOps, allPorts bool) (_ *UDPConn, resultErr error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("UDP setup context cannot be nil")
 	}
@@ -121,7 +128,7 @@ func newUDPConn(ctx context.Context, cfg UDPConfig, peer netip.AddrPort, ops udp
 	if cfg.DeviceName != "" && strings.TrimSpace(cfg.DeviceName) == "" {
 		return nil, fmt.Errorf("capture device name cannot contain only whitespace")
 	}
-	if cfg.LocalPort == 0 {
+	if cfg.LocalPort == 0 && !allPorts {
 		return nil, fmt.Errorf("nonzero local UDP port is required")
 	}
 	connected := peer.IsValid()
@@ -205,14 +212,16 @@ func newUDPConn(ctx context.Context, cfg UDPConfig, peer netip.AddrPort, ops udp
 		return nil, fmt.Errorf("UDP capture device is not Ethernet")
 	}
 	filter := udpListenFilter(r.local)
-	if connected {
+	if allPorts {
+		filter = udpMagicFilter(cfg.LocalIP, cfg.MagicHeader)
+	} else if connected {
 		filter = tunnelBPFFilter(r.local, peer)
 	}
 	if err := r.handle.SetBPFFilter(filter); err != nil {
 		return nil, fmt.Errorf("set UDP capture filter: %w", err)
 	}
 	lifetime, cancel := context.WithCancel(context.Background())
-	c := &UDPConn{resources: r, config: cfg, peer: peer, ops: ops, inbox: make(chan *UDPPacket, 256), ctx: lifetime, cancel: cancel, sendGate: make(chan struct{}, 1), macs: make(map[netip.Addr]udpMAC), changed: make(chan struct{})}
+	c := &UDPConn{resources: r, config: cfg, peer: peer, allPorts: allPorts, ops: ops, inbox: make(chan *UDPPacket, 256), ctx: lifetime, cancel: cancel, sendGate: make(chan struct{}, 1), macs: make(map[netip.Addr]udpMAC), changed: make(chan struct{})}
 	if connected {
 		mac, err := c.resolveMAC(ctx, device, peer.Addr(), gateway)
 		if err != nil {
@@ -260,7 +269,15 @@ func (c *UDPConn) capture() {
 			continue
 		}
 		packet, err := ParseUDPPacket(data)
-		if err != nil || packet.DestinationIP != c.config.LocalIP || packet.DestinationPort != c.config.LocalPort || !validUDPHost(packet.SourceIP) {
+		if err != nil || packet.DestinationIP != c.config.LocalIP || !validUDPHost(packet.SourceIP) {
+			continue
+		}
+		if c.allPorts {
+			// Unlike passive capture, the server only delivers usable reply tuples.
+			if packet.SourcePort == 0 || packet.DestinationPort == 0 {
+				continue
+			}
+		} else if packet.DestinationPort != c.config.LocalPort {
 			continue
 		}
 		if c.peer.IsValid() && (packet.SourceIP != c.peer.Addr() || packet.SourcePort != c.peer.Port()) {

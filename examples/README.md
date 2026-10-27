@@ -5,6 +5,7 @@ Runnable capture, clients, and echo servers for pcapnet and the PCAT protocol.
 | Program | Connection type |
 | --- | --- |
 | [udp-capture](udp-capture/main.go) | Read-only UDP prefix capture across all local ports |
+| [udp-capture-server](udp-capture-server/main.go) | Echo matching datagrams across all nonzero local ports |
 | [udp-client](udp-client/main.go), [udp-server](udp-server/main.go) | Direct UDP with optional magic framing or DTLS/mDTLS |
 | [tcp-client](tcp-client/main.go), [tcp-server](tcp-server/main.go) | PCAT TCP with plain, DTLS, or mDTLS channels |
 
@@ -16,14 +17,15 @@ privileges. Use two hosts or configured network namespaces with Ethernet routes.
 
 ```sh
 go build -o /tmp/pcapnet-udp-capture ./examples/udp-capture
+go build -o /tmp/pcapnet-udp-capture-server ./examples/udp-capture-server
 go build -o /tmp/pcapnet-udp-server ./examples/udp-server
 go build -o /tmp/pcapnet-udp-client ./examples/udp-client
 go build -o /tmp/pcapnet-tcp-server ./examples/tcp-server
 go build -o /tmp/pcapnet-tcp-client ./examples/tcp-client
 ```
 
-Each command supports `-h` and `-device` to override device selection. Clients
-and echo servers also support `-reserve-port` for optional host UDP reservation.
+Each command supports `-h` and `-device` to override device selection. Fixed-port
+clients and servers also support `-reserve-port` for optional host UDP reservation.
 Servers and capture run until Ctrl+C.
 Addresses below are variables to replace with the server's Ethernet IPv4 address.
 
@@ -64,6 +66,33 @@ bodies, with the header removed. The client reads replies on the same connection
 the server replies to the address returned by `ReadFrom`. Header bytes count
 toward the MTU, but are excluded from read/write byte counts. The Go API accepts
 arbitrary binary headers through `UDPConfig.MagicHeader`; empty disables framing.
+
+## UDP capture server
+
+```sh
+# Server host: receive matching traffic on every nonzero UDP destination port.
+SERVER_IP=192.0.2.2
+MAGIC=MYPROTO
+sudo /tmp/pcapnet-udp-capture-server -local-ip "$SERVER_IP" -magic "$MAGIC"
+```
+
+```sh
+# Client host: either destination port reaches the same capture server.
+SERVER_IP=192.0.2.2
+MAGIC=MYPROTO
+sudo /tmp/pcapnet-udp-client -peer "${SERVER_IP}:45001" -magic "$MAGIC" -message hello
+sudo /tmp/pcapnet-udp-client -peer "${SERVER_IP}:55002" -magic "$MAGIC" -message hello
+```
+
+The server echoes the body with the same magic prefix, using the received
+packet's destination port as its reply source port. The client receives the reply
+on its existing connection. `-magic-hex` accepts binary headers on the server.
+A nonempty header is required; mismatched traffic and zero-port tuples are ignored.
+
+The server uses one persistent capture/injection handle, with bounded queues and
+route/ARP-based replies. It binds no sockets and leaves host UDP delivery and
+possible ICMP port-unreachable responses unchanged. This is unencrypted header
+framing; the fixed-port examples below demonstrate DTLS/mDTLS.
 
 ## DTLS for direct UDP
 

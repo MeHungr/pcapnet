@@ -15,8 +15,9 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
-// UDPCaptureConfig selects read-only UDP capture on one Ethernet interface.
-// All destination ports at LocalIP are eligible; no host socket is reserved.
+// UDPCaptureConfig selects UDP prefix capture on one Ethernet interface.
+// CaptureUDP observes all destination ports; ListenUDPCapture also permits
+// replies on nonzero ports. Neither constructor reserves host sockets.
 type UDPCaptureConfig struct {
 	DeviceName  string     // Optional; defaults to the interface owning LocalIP
 	LocalIP     netip.Addr // Required local unicast IPv4 address
