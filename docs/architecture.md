@@ -21,8 +21,7 @@ flowchart TD
 channel messages and associates them with a `Peer`. A plain Peer has only a
 physical UDP endpoint. All-port capture also supplies `Peer.LocalAddrPort`, the
 contacted local endpoint used to select reply source ports. A secure Peer has a
-local, opaque connection ID,
-independent of the public wire routing ID and the allocator's session token.
+local, opaque connection ID, independent of the public wire routing ID and the allocator's session token.
 
 The server has one virtual stack and TCP listener. Allocated addresses map to
 peer sessions; the bridge restricts traffic to the configured subnet and the
@@ -106,7 +105,17 @@ Standalone transports also release their owned endpoints on terminal failure.
 `TCPServer` uses generation-bound SYN admission and acceptance. Authentication
 lookup, targeted revocation, and automatic DTLS lifecycle propagation are optional
 extensions to `DatagramEndpoint`; core pcapnet imports no DTLS implementation.
-See [peer lifecycle](peer-lifecycle.md) for the API and generation-isolation rules.
+`AcceptWithPeer` and `PeerConnection.Peer` preserve the original peer after
+closure or virtual-IP reassignment. Authentication snapshots expose the actual
+selected local certificate and verified remote chains; applications supply UUID
+binding, authorization, and active certificate-expiry/revocation policy.
+
+DTLS retirement signals invalidate PCAT routing without waiting for lease timeout.
+The server closes that generation's TCP state and drains egress before releasing
+its virtual IP; slow cleanup keeps the existing allocation slot occupied. The
+server's targeted disconnect waits for all associated cleanup, while the DTLS
+endpoint method waits only for its own layer. See
+[peer lifecycle](peer-lifecycle.md) for exact signal scopes and cancellation rules.
 
 ## Shutdown
 
@@ -121,8 +130,10 @@ references after their producers stop. Session Close clears leases and expiry
 callbacks; secure Close clears connection maps. This releases retained buffers;
 it does not promise cryptographic memory wiping or erase application-owned copies.
 
-Lease expiry invalidates the assignment and queued ingress generation, initiates abort of its
-registered TCP endpoints, and closes accepted connections before releasing the address.
+Lease expiry or secure-peer retirement invalidates the assignment and rejects
+queued ingress from its generation. `TCPServer` aborts pending handshakes and TCP
+endpoints, closes accepted connections, and drains older egress before releasing
+the address.
 The session expiry worker joins before stack destruction. The server keeps
 other peers running when one peer expires or fails.
 
@@ -134,7 +145,9 @@ other peers running when one peer expires or fails.
 | gVisor link queue | 256 packets |
 | UDP receive queue | 256 datagrams |
 | PCAT client/server receive queues | 256 packets each |
-| PCAT active leases | 256; example server overrides to 64 |
+| PCAT allocation slots, including retiring generations | 256; example server overrides to 64 |
+| TCPServer pending handshakes / queued accepts | 256 / 256 |
+| TCPServer allocation marks | Non-reused 32-bit local values; exhaustion rejects new allocations |
 | PCAT idle lease | Two minutes; clients keep alive every third of the lease |
 | Client allocation retry | 500 ms until setup cancellation/deadline |
 | UDP listener ARP cache | 64 entries, 30-second lifetime |
@@ -142,6 +155,7 @@ other peers running when one peer expires or fails.
 | DTLS connections, including pending handshakes | 128 |
 | DTLS handshake / application idle timeout | 10 seconds / five minutes |
 | DTLS encrypted / shared plaintext queues | 256 datagrams each |
+| DTLS retirement close-notify write deadline | 100 ms, best effort |
 | DTLS encrypted receive capacity | At most 8192 bytes with the pinned library |
 
 Queue overflow drops new arrivals. UDP and session messages provide no ordering
@@ -163,7 +177,9 @@ application can bind that port and the host may issue ICMP port-unreachable.
 Setup contexts end after initialization; connection deadlines control subsequent
 I/O. Direct UDP supports mutable read/write deadlines. Caller cancellation is
 preserved by datagram endpoints. Receive contexts cancel individual receives;
-Close cancels the owning lifetime. Terminal/cleanup errors remain available from
+Close cancels the owning lifetime. `DisconnectPeer` invalidates one exact peer
+and accepts a context to bound its cleanup wait; canceled waits do not restore
+retired generations. Terminal/cleanup errors remain available from
 Close or VirtualStack.Err after shutdown.
 
 PCAP receive loops use a 100 ms timeout; ARP polls use a 500 ms timeout. Native

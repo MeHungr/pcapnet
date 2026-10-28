@@ -39,7 +39,9 @@ identified separately from wire requirements.
 - **Connection ID:** local API handle for a verified DTLS connection; never a
   session-wire field. It is unrelated to the standardized DTLS CID extension.
 - **Peer:** physical endpoint plus any connection identity established by the
-  selected channel profile.
+  selected channel profile, and optional local delivery metadata for all-port replies.
+- **Allocation generation:** one assignment's token and lifetime; an IP may later
+  be reused by another generation. Accepted TCP metadata retains the original binding.
 
 Identifiers are opaque byte strings, not integers or credentials in themselves.
 The unencrypted profile supplies no authenticated identity. DTLS authenticates the
@@ -53,6 +55,11 @@ NAT traversal, address migration, multicast, or a full VPN router. Direct
 `DialUDP`/`ListenUDP` application traffic and the lower-level fixed-peer
 `NewPCAPTransport` format do not use this session protocol. An ordinary UDP echo
 server or a bare DTLS socket cannot substitute for a tunnel peer.
+
+Peer metadata lookup, targeted retirement, and lifecycle notifications are local
+API extensions. They add no wire fields or packet overhead. For authentication
+snapshots, historical records, and generation-safe revocation, see
+[peer lifecycle](../peer-lifecycle.md).
 
 For ownership and concurrency contracts, see [architecture](../architecture.md).
 For runnable programs, see [examples](../../examples/README.md).

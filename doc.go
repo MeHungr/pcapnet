@@ -22,6 +22,15 @@
 // memory; NewPCAPTransport encapsulates inner IPv4 packets in Ethernet/IPv4/UDP
 // frames exchanged with a fixed physical peer through packet capture/injection.
 //
+// TCPServer.AcceptWithPeer binds accepted connections to their original PCAT
+// allocation peer; existing Accept remains supported. PeerConnection exposes that
+// historical binding on the connection. PeerInfoProvider, PeerLifecycle, and
+// PeerDisconnecter optionally expose authentication snapshots, retirement signals,
+// and targeted cleanup without changing DatagramEndpoint. PeerInformation separates
+// encryption from certificate authentication; its Done signal marks retirement.
+// TCPServer.DisconnectPeer waits for the exact peer's PCAT/TCP cleanup, and secure
+// endpoint failures propagate without waiting for the allocation timeout.
+//
 // Virtual addresses belong to gVisor and need not be assigned to the host OS.
 // The physical route selects the host source address and next-hop MAC. Optional
 // host UDP port reservation is controlled by the physical endpoint config.

@@ -147,11 +147,20 @@ NOT renew a lease. Replies sent by the server do not renew it. Clients SHOULD
 send Keepalive every third of the assigned lease duration when otherwise idle.
 Keepalive has no response in v1 and does not prove the server is still reachable.
 
-On expiry, the server invalidates the token, drops queued packets from that
-assignment, and initiates teardown of associated TCP state before reusing the address.
-There is no release, acknowledgement, or lease-resumption message. Closing a
-client stops keepalives; its lease remains reserved until expiry. A restarted
-server loses its allocations, and clients must establish new sessions.
+On expiry, the server invalidates the token and rejects queued packets from that
+assignment. The reference `TCPServer` quarantines the virtual address until its
+pending handshakes, TCP endpoint workers, managed connections, and queued egress
+finish, then permits reuse. Accepted TCP metadata remains bound to its original
+allocation generation even after that address is assigned again.
+
+There is no session-wire release, acknowledgement, or lease-resumption message.
+Closing a plain client stops keepalives; its lease normally remains reserved until
+expiry unless explicitly retired by the server. When a secure channel reports
+peer termination, the reference implementation invalidates that exact peer's
+allocations immediately rather than waiting for idle timeout. This propagation
+uses local lifecycle notifications, not a new PCAT message. Close notifications
+can be lost; remote silence is detected by the configured secure idle timeout.
+A restarted server loses its allocations, and clients must establish new sessions.
 
 ## Data validation and routing
 
@@ -185,7 +194,11 @@ Secure transports MUST bind a lease to the verified connection, not just its
 physical address. The reference API uses `Peer.ConnectionID` for this binding.
 That local handle is never serialized in a session message and MUST change on
 reconnection. A token from a previous or different secure connection MUST NOT
-be accepted, even if the outer UDP address is identical.
+be accepted, even if the outer UDP address is identical. Targeted retirement uses
+the exact handle and invalidates all its allocations without affecting another
+connection sharing that address. See [peer lifecycle](../peer-lifecycle.md) for
+local API contracts; authentication snapshots, generation marks, and notifications
+do not change the session header or packet budgets.
 
 ## Implementation and tests
 

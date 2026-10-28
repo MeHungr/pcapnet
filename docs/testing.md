@@ -39,8 +39,17 @@ sharing a physical tuple, immutable authentication snapshots in server-only/mutu
 modes, raw authentication reporting, selected local certificates, targeted
 revocation, blocked reads/writes, idle-expiry propagation, stale queued accepts,
 forced `/30` virtual-IP reuse, delayed cleanup, cancellable disconnect waits,
-and rejection of dequeued ingress/marked egress from a retired generation.
+rejection of dequeued ingress/marked egress from a retired generation,
+incomplete-handshake revocation, and stale decrypted plaintext after reconnection.
 These use real DTLS and gVisor over simulated delivery, without capture privileges.
+
+| Regression source | Coverage |
+| --- | --- |
+| [Core peer tests](../tcp_peer_test.go) | Generation-bound accepts, queued accepts and `/30` reuse, delayed cleanup, canceled waits, incomplete handshakes, raw authentication metadata |
+| [DTLS peer tests](../dtlstransport/peer_test.go) | Immutable evidence, selected certificates, shared-tuple peers, targeted revocation, blocked I/O, idle expiry, historical snapshots, buffered plaintext across reconnection |
+
+The [API reference](peer-lifecycle.md#api-reference) distinguishes DTLS cleanup
+completion from full PCAT/TCP cleanup and the lifetimes observed by each signal.
 
 ## Live tests
 

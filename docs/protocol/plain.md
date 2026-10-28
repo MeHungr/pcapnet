@@ -58,6 +58,13 @@ binds each assignment to that physical endpoint and checks its token and inner
 addresses before delivering data. These are routing checks, not proof of sender
 identity: an observer can read tokens and an attacker may forge UDP traffic.
 
+The reference `PeerInfo` API reports `Encrypted=false`, both certificate flags
+false, and no certificate evidence. `TCPServer.AcceptWithPeer` still binds a
+connection to its allocation generation, but that binding is not cryptographic
+authentication. Raw UDP cannot identify a remote reconnection or signal remote
+termination. `TCPServer.DisconnectPeer` retires current matching leases; it cannot
+revoke a cryptographic identity. See [peer lifecycle](../peer-lifecycle.md).
+
 The reference backend does not migrate a session to a new physical endpoint.
 Clients changing addresses or ports establish a new allocation. A client cannot
 use an opaque secure connection handle through `PlainUDPEndpoint`; it is rejected

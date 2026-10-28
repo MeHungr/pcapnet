@@ -147,6 +147,13 @@ Authorization callback details stay local. There is no PCAT authentication error
 payload. DTLS may emit its standard alerts; allocation is never exposed to a
 rejected connection.
 
+In this server-authenticated profile, the server's metadata MUST NOT report the
+anonymous client as certificate-authenticated. The reference `PeerInfo` lookup
+exposes actual presented certificates, verified chains, and the selected local
+chain as detached snapshots. Encryption and a local connection ID alone do not
+establish an application identity. Metadata retained after its retirement signal
+is historical; stale active lookups return `ErrPeerNotFound`.
+
 ## Delivery and resource limits
 
 Application datagrams remain unordered and unreliable; inner TCP supplies stream
@@ -159,7 +166,13 @@ to 128 by default. It uses a 10-second handshake deadline and a five-minute idle
 limit; successful application sends and receives both count as activity. Per-peer
 encrypted queues and the shared plaintext queue each hold 256 datagrams. Overflow
 drops new arrivals. A peer failure affects that peer; a raw endpoint failure
-closes the adapter. These defaults are not negotiated fields.
+closes the adapter. The reference lifecycle interface propagates peer termination
+into PCAT/TCP immediately, invalidating its allocations and buffered delivery.
+`Endpoint.DisconnectPeer` waits for DTLS cleanup; `TCPServer.DisconnectPeer` also
+waits for associated inner TCP/generation cleanup. Cancellation bounds waiting,
+while retirement continues. No new wire message or mode flag is introduced.
+These defaults and API contracts are not negotiated fields; see
+[peer lifecycle](../peer-lifecycle.md).
 
 Shutdown cancels I/O and handshakes and joins owned workers. Authorization
 callbacks MUST honor their supplied context and MUST NOT synchronously close the

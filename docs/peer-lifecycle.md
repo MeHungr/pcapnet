@@ -13,6 +13,25 @@ The [TCP server example](../examples/tcp-server/main.go) shows complete setup an
 acceptance. Standard `VirtualStack.Listen` remains a general TCP listener; use
 `TCPServer` for these generation-bound peer APIs.
 
+## API reference
+
+| API | Result or completion scope |
+| --- | --- |
+| `TCPServer.Accept()` | Existing `net.Listener` acceptance; returned connections also implement `PeerConnection` |
+| `TCPServer.AcceptWithPeer()` | `(net.Conn, Peer, error)` with the SYN's original allocation binding |
+| `PeerConnection.Peer()` | Immutable originating handle, including after connection closure |
+| `TCPServer.PeerInfo(peer)` | `PeerInformation` for an active admitted exact peer |
+| `dtlstransport.Endpoint.PeerInfo(peer)` | `PeerInformation` for an active exact DTLS connection |
+| `TCPServer.PeerDone(peer)` | Retirement channel for an active matching PCAT allocation |
+| `dtlstransport.Endpoint.PeerDone(peer)` | Retirement channel for the exact DTLS connection |
+| `TCPServer.DisconnectPeer(ctx, peer)` | Retire all matching allocations and the secure peer; wait for PCAT/TCP and DTLS cleanup |
+| `dtlstransport.Endpoint.DisconnectPeer(ctx, peer)` | Retire the secure peer; wait for DTLS cleanup; PCAT observers perform their cleanup independently |
+| `ErrPeerNotFound` | No current metadata/lifecycle entry for that exact handle |
+
+`dtlstransport.PeerInfo` remains the existing authorization callback input type;
+`pcapnet.PeerInformation` is the detached active-lookup result. Neither type
+replaces application identity or authorization policy.
+
 ## Authentication evidence
 
 `dtlstransport.Endpoint.PeerInfo(peer)` and `TCPServer.PeerInfo(peer)` require the
@@ -20,6 +39,7 @@ complete exact handle. `PeerInformation` contains detached, caller-owned copies:
 
 | Field | Meaning |
 | --- | --- |
+| `Peer` | Exact handle to which all evidence belongs |
 | `Encrypted` | DTLS encryption was negotiated; not a sensor identity claim |
 | `PeerCertificateAuthenticated` | The remote peer's certificate chain was verified |
 | `ClientCertificateAuthenticated` | Client-certificate authentication participated in this handshake |
@@ -38,6 +58,14 @@ servers verify the client chain. Raw mode reports no encryption or cryptographic
 authentication, with no certificate evidence. Raw endpoint `Done` describes only
 the endpoint lifetime; raw UDP cannot detect remote reconnection or termination.
 `TCPServer` supplies an allocation-lifetime `Done` for raw peer snapshots.
+
+| Observing side and mode | Encrypted | Remote certificate verified | Client-certificate proof |
+| --- | --- | --- | --- |
+| Raw, either side | No | No | No |
+| DTLS server observing client | Yes | No | No |
+| DTLS client observing server | Yes | Yes | No |
+| mDTLS server observing client | Yes | Yes | Yes |
+| mDTLS client observing server | Yes | Yes | Yes |
 
 Applications bind sensor UUIDs, SANs, fingerprints, and registry authorization to
 verified evidence. Certificates being present alone is not proof of verification.
@@ -74,12 +102,21 @@ idempotent; a stale handle cannot select its replacement. `ctx` bounds waiting.
 If it expires after retirement, cleanup continues and invalidation is permanent.
 Native PCAP calls already executing still depend on the driver's return behavior.
 
-`TCPServer.PeerDone` exposes PCAT allocation invalidation. Connection read/write
+`TCPServer.PeerDone` exposes invalidation of an active matching PCAT allocation.
+If a peer owns several allocations, use the DTLS endpoint's `PeerDone` to observe
+their shared secure connection; targeted disconnection retires all its allocations. Connection read/write
 operations also fail on abort, including blocked operations. The endpoint's
 `PeerDone` observes the DTLS connection itself; a PCAT lease can expire while its
 DTLS connection remains established. A raw handle has no authenticated connection
 generation, so raw disconnection retires current leases but cannot identify remote
 reconnections or revoke an identity cryptographically.
+
+| Returned signal | Lifetime observed |
+| --- | --- |
+| DTLS `PeerDone` / secure `PeerInformation.Done` | Exact DTLS connection |
+| `TCPServer.PeerDone` | Matching PCAT allocation generation |
+| Raw `TCPServer.PeerInfo(...).Done` | Matching PCAT allocation generation |
+| Raw `PlainUDPEndpoint.PeerInfo(...).Done` | Local UDP endpoint; no remote-liveness claim |
 
 Notifications use closed channels, not callbacks. Multiple observers can wait
 independently without consuming each other's events; no unsubscribe or callback

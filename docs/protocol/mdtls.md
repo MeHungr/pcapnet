@@ -83,7 +83,17 @@ A trusted certificate does not automatically grant application permissions.
 allocation. It must honor cancellation and return policy failures locally, without
 sending its error text to peers. Applications needing explicit revocation policy
 must supply it; the adapter does not provide automatic revocation retrieval or
-certificate renewal.
+certificate renewal. The reference `PeerInfo` lookup exposes the actual verified
+peer chains and selected local certificate chain for application identity binding,
+fingerprints, and expiry policy. `PeerCertificateAuthenticated` is true for a
+verified mDTLS peer; it does not mean the application has authorized its sensor ID.
+
+Applications can revoke an exact active handle with `DisconnectPeer(ctx, peer)`.
+Use the `TCPServer` method when completion must include PCAT allocation and inner
+TCP cleanup. Automatic DTLS failure/expiry uses the same lifecycle propagation;
+a replacement sharing the UDP address remains independent. Retained metadata
+becomes historical when its `Done` closes. See
+[peer lifecycle](../peer-lifecycle.md) for cancellation and notification contracts.
 
 ## Credential lifecycle
 

@@ -12,6 +12,7 @@ DTLS, or mutually authenticated DTLS (mDTLS). Direct UDP needs no gVisor stack.
 - `net.Conn` / `net.PacketConn` for direct physical UDP, with optional magic-header framing.
 - UDP magic-header capture across all ports, with read-only and replying APIs.
 - TCP `Dial` / `Listen`, automatic client allocation, and concurrent peers.
+- Generation-bound TCP peer metadata, authentication evidence, and targeted revocation.
 - Optional [DTLS adapter](dtlstransport/README.md) for direct datagrams or PCAT, using Pion DTLS 1.2.
 - Configurable virtual subnets, MTUs, deadlines, and session limits.
 - Automatic Ethernet-device selection and optional host UDP port reservation.
@@ -64,7 +65,7 @@ Virtual addresses exist inside gVisor; no host addresses or routes are installed
 | [udp-capture](examples/udp-capture/main.go) | Observe a configurable UDP payload prefix across all ports |
 | [udp-capture-server](examples/udp-capture-server/main.go) | All-port echo with optional DTLS/mDTLS, preserving the contacted port |
 | [tcp-client](examples/tcp-client/main.go) | Allocate a PCAT address and exchange TCP data |
-| [tcp-server](examples/tcp-server/main.go) | Accept concurrent TCP connections from PCAT peers |
+| [tcp-server](examples/tcp-server/main.go) | Accept concurrent TCP connections with their exact originating peer handles |
 
 See the [example guide](examples/README.md) for plain, DTLS, mDTLS, and concurrent
 client commands. All programs support `-h` and `-device`; fixed-port clients and
@@ -79,7 +80,15 @@ servers also support `-reserve-port`.
 | `ListenUDPCapture` / `UDPCaptureServer` | Receive matching bodies across nonzero ports and reply from the contacted port |
 | `DialPCAPStack` / `ListenPCAPTCP` | Plain PCAT client stack / shared TCP server |
 | `DialStack` / `NewTCPServer` | Allocate and run TCP over a supplied plain or secure endpoint |
-| `DatagramEndpoint` / `Peer` | Message transport and per-connection identity |
+| `TCPServer.AcceptWithPeer` / `PeerConnection.Peer` | Accepted TCP connection's original allocation peer; existing `Accept` remains supported |
+| `TCPServer.PeerInfo` / `PeerInformation` | Detached authentication evidence for an admitted exact peer |
+| `TCPServer.PeerDone` / `DisconnectPeer` | Observe allocation invalidation / retire a peer and wait for its PCAT/TCP cleanup |
+| `DatagramEndpoint` / `Peer` | Message transport and exact remote/local delivery and connection identity |
+| `NewPlainUDPEndpoint` / `NewPlainUDPCaptureEndpoint` | Adapt fixed-port UDP / all-port capture to datagram delivery |
+| `dtlstransport.Dial` / `Listen` | Optional DTLS/mDTLS datagram endpoints for direct UDP or PCAT |
+| `dtlstransport.Endpoint.PeerInfo` / `PeerDone` / `DisconnectPeer` | Secure-peer evidence, retirement notification, and targeted DTLS cleanup |
+| `PeerInfoProvider` / `PeerLifecycle` / `PeerDisconnecter` | Optional extensions; `DatagramEndpoint` itself is unchanged |
+| `ErrPeerNotFound` | Exact peer is no longer active; never a replacement-by-address lookup |
 | `PacketTransport` / `NewVirtualStackWithTransport` | Complete inner IP packets and gVisor attachment |
 | `NewMemoryPair` | In-memory packet transport |
 | `NewPCAPTransport` | Lower-level fixed-peer raw encapsulation, outside the PCAT session protocol |
@@ -135,7 +144,15 @@ also exposes `PeerConnection.Peer()`. `Accept()` remains compatible.
 `PeerDone(peer)` signals invalidation; `DisconnectPeer(ctx, peer)` retires that
 exact peer and all its inner TCP connections. DTLS failures and idle expiry
 propagate automatically into PCAT/TCP. Server-only DTLS reports anonymous clients
-accurately, and raw mode reports no cryptographic authentication.
+accurately, and raw mode reports no cryptographic authentication. Encryption alone
+does not authenticate a sensor UUID; applications bind verified certificates to
+application identities and authorization policy.
+
+Use the complete `Peer`, including `ConnectionID` and any `LocalAddrPort`. A stale
+secure handle cannot identify or revoke a replacement at the same UDP address.
+Metadata snapshots become historical when `Done` closes. Cancellation bounds a
+disconnect call's wait; retirement continues after cancellation. The server method
+waits for PCAT/TCP cleanup, while the DTLS endpoint method waits for DTLS cleanup.
 
 See [peer metadata and lifecycle](docs/peer-lifecycle.md) for snapshots, historical
 metadata, cancellation, ownership, generation isolation, and callback contracts.

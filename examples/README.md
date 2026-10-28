@@ -260,6 +260,22 @@ Both endpoints verify their peer's certificate. Credential provisioning and
 rotation belong to the importing application or deployment tooling. See the
 [mDTLS specification](../docs/protocol/mdtls.md) for trust and packet details.
 
+## Accepted peer metadata
+
+The [TCP server](tcp-server/main.go) calls `AcceptWithPeer` and prints the exact
+originating peer's physical address and `ConnectionID` for each connection.
+Multiple connections on one client allocation share a handle; secure clients
+sharing a physical UDP tuple have different connection IDs. Raw mode uses a zero
+connection ID and provides no cryptographic authentication.
+
+Importing applications can use `TCPServer.PeerInfo` for detached certificate and
+verification evidence, `PeerDone` for invalidation, and `DisconnectPeer(ctx, peer)`
+for targeted retirement with PCAT/TCP cleanup. Preserve the complete accepted
+handle rather than rebuilding it from the TCP connection's virtual remote IP.
+The example is an echo service; UUID authorization and certificate-expiry policy
+belong to the importing application. See the
+[peer lifecycle API reference](../docs/peer-lifecycle.md#api-reference).
+
 ## Concurrent clients
 
 One server can serve independent client processes sharing a physical UDP endpoint.

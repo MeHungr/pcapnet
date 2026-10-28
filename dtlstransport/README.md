@@ -14,6 +14,7 @@ The importing application chooses the endpoint and supplies credentials and poli
 - Certificate-verified server authentication and optional required client authentication.
 - ECDHE / AES-128-GCM, required Extended Master Secret, and replay rejection.
 - Independent connections for clients sharing one physical UDP endpoint.
+- Detached authentication snapshots, exact-peer retirement, and PCAT/TCP lifecycle propagation.
 - Bounded handshake slots and queues, mutable deadlines, and joined shutdown.
 - No skip-verification option and no automatic plaintext fallback.
 
@@ -59,6 +60,28 @@ contact different local ports without crossing connections. No per-port listener
 or unbounded reply-address map is created. Local metadata does not add wire bytes
 or change the routing envelope. The configured magic prefix remains outside DTLS.
 
+## API overview
+
+| API | Role |
+| --- | --- |
+| `Dial(ctx, raw, peer, ClientConfig)` | Verify the server and return a secure client endpoint |
+| `Listen(raw, ServerConfig)` | Serve independent secure peers on a supplied raw endpoint |
+| `Endpoint.Peer()` | Client's exact authenticated server handle; listeners learn handles from receives |
+| `Endpoint.SendTo` / `ReceiveFrom` | Exchange complete application datagrams using exact peer handles |
+| `Endpoint.MaxDatagramSize()` | Application body capacity after routing and DTLS overhead |
+| `Endpoint.PeerInfo(peer)` | Caller-owned `pcapnet.PeerInformation` snapshot for an active exact handle |
+| `Endpoint.PeerDone(peer)` | Broadcast invalidation channel for that DTLS connection |
+| `Endpoint.DisconnectPeer(ctx, peer)` | Retire only that peer and wait for DTLS cleanup; stale handles are harmless |
+| `Endpoint.Close()` | Close all peers, workers, and the owned raw endpoint |
+| `PeerInfo` | Existing `Authorize` callback input; distinct from the active metadata lookup method |
+
+`Endpoint` implements `pcapnet.DatagramEndpoint` plus the optional
+`PeerInfoProvider`, `PeerLifecycle`, and `PeerDisconnecter` interfaces. Existing
+datagram implementations do not need these extensions. For accepted inner TCP
+metadata and cleanup completion, use `TCPServer.AcceptWithPeer` and
+`TCPServer.DisconnectPeer` as described in the
+[core API overview](../README.md#api-overview).
+
 ## Configuration
 
 | Setting | Meaning |
@@ -100,10 +123,19 @@ is application-owned and is not erased by closing the transport.
 
 `Endpoint.PeerInfo(peer)` returns detached presented certificates, verified
 chains, the actual selected local certificate, and authentication flags.
-`PeerDone(peer)` broadcasts retirement, and `DisconnectPeer(ctx, peer)` retires
+`PeerDone(peer)` broadcasts DTLS connection retirement, and `DisconnectPeer(ctx, peer)` retires
 one exact handle without stopping other clients. PCAT observes retirement through
 the optional core lifecycle interface. For complete inner TCP cleanup, use
-`TCPServer.DisconnectPeer`.
+`TCPServer.DisconnectPeer`. Cancellation bounds the cleanup wait, not retirement;
+cleanup continues if the caller's context expires. Read failure, idle expiry,
+received close notification, and explicit retirement propagate through lifecycle
+channels without waiting for PCAT allocation timeout.
+
+Server-only DTLS encrypts traffic but does not certificate-authenticate clients.
+`PeerCertificateAuthenticated` is false on that server, while the client reports
+verified server authentication. mDTLS servers report verified client chains.
+`LocalCertificates` records the actual selected chain, not every configured
+certificate; it is empty on clients whose certificate was not requested.
 
 Lookups of stale handles return `pcapnet.ErrPeerNotFound`; retained metadata is
 historical after its `Done` closes. Full connection IDs remain mandatory even
@@ -128,8 +160,8 @@ rebinding are not supported.
 
 The adapter subtracts 61 bytes from the raw datagram capacity for routing and
 DTLS protection, and caps encrypted datagrams at the library's 8192-byte receive
-limit. When used with PCAT, the session layer subtracts another 24 bytes. At physical IPv4 MTU 1500,
-the maximum inner packet is 1387 bytes; the examples use 1200.
+limit. When used with PCAT, the session layer subtracts another 24 bytes. At
+physical IPv4 MTU 1500, the maximum inner packet is 1387 bytes; the examples use 1200.
 
 An optional `UDPConfig.MagicHeader` precedes the routing envelope on the wire:
 
@@ -151,6 +183,8 @@ go test -race -timeout=30s ./dtlstransport
 
 Tests use in-memory datagram delivery and temporary test identities; they cover
 standalone DTLS/mDTLS datagram echo, concurrent allocated TCP, invalid credentials,
-authorization, replay/tampering,
-reconnect isolation, jumbo MTUs, cancellation, rollback, and shutdown. They do not
+authorization, replay/tampering, reconnect isolation, jumbo MTUs, cancellation,
+rollback, and shutdown. Peer regressions also cover snapshot ownership, selected
+certificates, targeted revocation of multiple TCP connections, shared physical
+tuples, idle expiry, and stale buffered plaintext after reconnection. They do not
 replace live PCAP interoperability testing.
