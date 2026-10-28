@@ -32,14 +32,13 @@ func NewTCPServer(endpoint DatagramEndpoint, cfg ServerConfig, port int) (*TCPSe
 	if err != nil {
 		return nil, err
 	}
-	v, err := NewVirtualStackWithTransport(Config{VirtualIP: cfg.VirtualIP, PeerSubnet: cfg.AddressPool, MTU: cfg.MTU}, transport)
+	var listener *peerListener
+	v, err := newVirtualStackWithTransport(Config{VirtualIP: cfg.VirtualIP, PeerSubnet: cfg.AddressPool, MTU: cfg.MTU}, transport, func(v *VirtualStack) {
+		listener = newPeerListener(v, transport, port)
+		v.peerListener = listener
+	})
 	if err != nil {
 		return nil, errors.Join(err, transport.Close())
-	}
-	listener, err := v.Listen(port)
-	if err != nil {
-		v.Close()
-		return nil, errors.Join(err, v.Err())
 	}
 	return &TCPServer{Listener: listener, stack: v}, nil
 }

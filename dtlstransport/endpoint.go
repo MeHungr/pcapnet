@@ -2,6 +2,7 @@ package dtlstransport
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -19,6 +20,11 @@ type connection struct {
 	conn     *dtls.Conn   // Published and read under Endpoint.mu; immutable thereafter.
 	peer     pcapnet.Peer // Published only after verification and authorization.
 	sendGate chan struct{}
+	done     chan struct{}
+	cleaned  chan struct{}
+	finished chan struct{}
+	retired  bool
+	info     pcapnet.PeerInformation
 	activity time.Time // Successful application sends/receives; protected by Endpoint.mu.
 }
 type message struct {
@@ -115,7 +121,12 @@ func Dial(ctx context.Context, raw pcapnet.DatagramEndpoint, remote pcapnet.Peer
 	e.routes[p.packets.key] = p
 	e.workers.Add(1)
 	go e.route()
-	options := []dtls.ClientOption{dtls.WithServerName(cfg.ServerName), dtls.WithRootCAs(cfg.RootCAs)}
+	options := []dtls.ClientOption{dtls.WithServerName(cfg.ServerName), dtls.WithRootCAs(cfg.RootCAs), dtls.WithGetClientCertificate(func(request *dtls.CertificateRequestInfo) (*tls.Certificate, error) {
+		return e.clientCertificate(p, cfg.Certificates, request)
+	})}
+	for _, opt := range e.verificationOptions(p) {
+		options = append(options, opt)
+	}
 	for _, opt := range commonOptions(e.capacity + recordOverhead) {
 		options = append(options, opt)
 	}
@@ -156,7 +167,7 @@ func Dial(ctx context.Context, raw pcapnet.DatagramEndpoint, remote pcapnet.Peer
 	return e, nil
 }
 func (e *Endpoint) newConnection(key routeKey) *connection {
-	p := &connection{packets: newPacketConn(e, key), sendGate: make(chan struct{}, 1)}
+	p := &connection{packets: newPacketConn(e, key), sendGate: make(chan struct{}, 1), done: make(chan struct{}), cleaned: make(chan struct{}), finished: make(chan struct{})}
 	p.sendGate <- struct{}{}
 	return p
 }
@@ -188,7 +199,7 @@ func (e *Endpoint) route() {
 		}
 		key := routeKey{remote, id}
 		e.mu.Lock()
-		if e.closing {
+		if e.closing || e.ctx.Err() != nil {
 			e.mu.Unlock()
 			return
 		}
@@ -211,8 +222,12 @@ func (e *Endpoint) route() {
 func (e *Endpoint) accept(p *connection) {
 	// The lifetime worker remains registered through both handshake and reads.
 	defer e.workers.Done()
+	defer close(p.finished)
 	defer e.remove(p)
-	options := []dtls.ServerOption{dtls.WithCertificates(e.server.Certificates...), dtls.WithClientCAs(e.server.ClientCAs)}
+	options := []dtls.ServerOption{dtls.WithGetCertificate(func(hello *dtls.ClientHelloInfo) (*tls.Certificate, error) { return e.serverCertificate(p, hello) }), dtls.WithClientCAs(e.server.ClientCAs)}
+	for _, opt := range e.verificationOptions(p) {
+		options = append(options, opt)
+	}
 	for _, opt := range commonOptions(e.capacity + recordOverhead) {
 		options = append(options, opt)
 	}
@@ -225,9 +240,11 @@ func (e *Endpoint) accept(p *connection) {
 	}
 	e.mu.Lock()
 	p.conn = conn
-	closed := e.closing
+	closed := e.closing || p.retired
 	e.mu.Unlock()
 	if closed {
+		p.packets.Close()
+		_ = conn.Close()
 		return
 	}
 	ctx, cancel := context.WithTimeout(e.ctx, e.limits.HandshakeTimeout)
@@ -236,7 +253,7 @@ func (e *Endpoint) accept(p *connection) {
 		return
 	}
 	e.mu.Lock()
-	if e.closing {
+	if e.closing || p.retired || e.ctx.Err() != nil {
 		e.mu.Unlock()
 		return
 	}
@@ -266,6 +283,7 @@ func (e *Endpoint) authorize(ctx context.Context, p *connection, callback func(c
 		}
 		info.Certificates = append(info.Certificates, cert)
 	}
+	evidence := cloneCertificates(info.Certificates)
 	if callback != nil {
 		if err := callback(ctx, info); err != nil {
 			return err
@@ -275,13 +293,19 @@ func (e *Endpoint) authorize(ctx context.Context, p *connection, callback func(c
 		return err
 	}
 	e.mu.Lock()
+	if p.retired || e.closing {
+		e.mu.Unlock()
+		return net.ErrClosed
+	}
 	p.peer = info.Peer
+	e.finishInfo(p, evidence)
 	p.activity = time.Now()
 	e.mu.Unlock()
 	return nil
 }
 func (e *Endpoint) read(p *connection) {
 	defer e.workers.Done()
+	defer close(p.finished)
 	defer e.remove(p)
 	e.readMessages(p)
 }
@@ -320,14 +344,31 @@ func (e *Endpoint) readMessages(p *connection) {
 }
 func (e *Endpoint) remove(p *connection) {
 	e.mu.Lock()
-	delete(e.routes, p.packets.key)
-	delete(e.peers, p.peer)
-	conn := p.conn
-	e.mu.Unlock()
-	p.packets.Close()
-	if conn != nil {
-		_ = conn.Close()
+	if p.retired {
+		e.mu.Unlock()
+		return
 	}
+	p.retired = true
+	if e.routes[p.packets.key] == p {
+		delete(e.routes, p.packets.key)
+	}
+	if e.peers[p.peer] == p {
+		delete(e.peers, p.peer)
+	}
+	close(p.done)
+	p.packets.writeDeadline.Set(time.Now().Add(100 * time.Millisecond))
+	conn := p.conn
+	e.workers.Add(1)
+	e.mu.Unlock()
+	go func() {
+		defer e.workers.Done()
+		defer close(p.cleaned)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		p.packets.Close()
+		queue.Drain(p.packets.incoming)
+	}()
 }
 func (e *Endpoint) failed(err error) {
 	e.mu.Lock()
@@ -358,7 +399,7 @@ func (e *Endpoint) ReceiveFrom(ctx context.Context) ([]byte, pcapnet.Peer, error
 		case m := <-e.incoming:
 			e.mu.Lock()
 			p := e.peers[m.peer]
-			valid := p != nil && p.packets.ctx.Err() == nil
+			valid := p != nil && !p.retired && !e.closing && e.ctx.Err() == nil && p.packets.ctx.Err() == nil
 			e.mu.Unlock()
 			if valid {
 				return m.data, m.peer, nil
@@ -379,6 +420,9 @@ func (e *Endpoint) SendTo(ctx context.Context, b []byte, peer pcapnet.Peer) erro
 	}
 	e.mu.Lock()
 	p := e.peers[peer]
+	if e.closing || e.ctx.Err() != nil {
+		p = nil
+	}
 	e.mu.Unlock()
 	if p == nil {
 		return net.ErrClosed
@@ -386,6 +430,8 @@ func (e *Endpoint) SendTo(ctx context.Context, b []byte, peer pcapnet.Peer) erro
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-p.done:
+		return net.ErrClosed
 	case <-p.packets.ctx.Done():
 		return net.ErrClosed
 	case <-e.ctx.Done():
@@ -393,6 +439,9 @@ func (e *Endpoint) SendTo(ctx context.Context, b []byte, peer pcapnet.Peer) erro
 	case <-p.sendGate:
 	}
 	defer func() { p.sendGate <- struct{}{} }()
+	if channelRetired(p.done) {
+		return net.ErrClosed
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -422,23 +471,19 @@ func (e *Endpoint) Close() error {
 	e.once.Do(func() {
 		e.mu.Lock()
 		e.closing = true
-		e.cancel()
 		connections := make([]*connection, 0, len(e.routes))
-		conns := make([]*dtls.Conn, 0, len(e.routes))
 		for _, p := range e.routes {
 			connections = append(connections, p)
-			if p.conn != nil {
-				conns = append(conns, p.conn)
-			}
 		}
 		e.mu.Unlock()
 		for _, p := range connections {
-			p.packets.Close()
+			e.remove(p)
 		}
+		for _, p := range connections {
+			<-p.cleaned
+		}
+		e.cancel()
 		err := e.raw.Close()
-		for _, c := range conns {
-			_ = c.Close()
-		}
 		e.workers.Wait()
 		queue.Drain(e.incoming)
 		e.mu.Lock()

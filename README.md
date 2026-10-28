@@ -125,6 +125,21 @@ to release its endpoints and workers; inspect `VirtualStack.Err()` for terminal
 and cleanup errors. Detailed contracts and defaults are in
 [architecture](docs/architecture.md) and the source API comments.
 
+## Peer identity and revocation
+
+`TCPServer.AcceptWithPeer()` returns the accepted connection and its original
+allocation's exact `Peer`, including the secure `ConnectionID`. The connection
+also exposes `PeerConnection.Peer()`. `Accept()` remains compatible.
+
+`TCPServer.PeerInfo(peer)` exposes detached certificate and verification evidence.
+`PeerDone(peer)` signals invalidation; `DisconnectPeer(ctx, peer)` retires that
+exact peer and all its inner TCP connections. DTLS failures and idle expiry
+propagate automatically into PCAT/TCP. Server-only DTLS reports anonymous clients
+accurately, and raw mode reports no cryptographic authentication.
+
+See [peer metadata and lifecycle](docs/peer-lifecycle.md) for snapshots, historical
+metadata, cancellation, ownership, generation isolation, and callback contracts.
+
 ## Protocol and security
 
 The [PCAT specification](docs/protocol/README.md) defines the common session

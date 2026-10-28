@@ -101,6 +101,13 @@ reporting the failure. This prevents a worker from deadlocking while joining
 itself. Stack worker failures reject new connections and close the owning stack.
 Standalone transports also release their owned endpoints on terminal failure.
 
+## Peer generations
+
+`TCPServer` uses generation-bound SYN admission and acceptance. Authentication
+lookup, targeted revocation, and automatic DTLS lifecycle propagation are optional
+extensions to `DatagramEndpoint`; core pcapnet imports no DTLS implementation.
+See [peer lifecycle](peer-lifecycle.md) for the API and generation-isolation rules.
+
 ## Shutdown
 
 Closing a stack/server rejects new operations and cancels pending I/O. Connections

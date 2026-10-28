@@ -96,6 +96,21 @@ and concurrent closes are safe. A failed/idle server peer is isolated; a raw
 endpoint failure closes the adapter. Plaintext already returned to the application
 is application-owned and is not erased by closing the transport.
 
+## Peer metadata and targeted disconnection
+
+`Endpoint.PeerInfo(peer)` returns detached presented certificates, verified
+chains, the actual selected local certificate, and authentication flags.
+`PeerDone(peer)` broadcasts retirement, and `DisconnectPeer(ctx, peer)` retires
+one exact handle without stopping other clients. PCAT observes retirement through
+the optional core lifecycle interface. For complete inner TCP cleanup, use
+`TCPServer.DisconnectPeer`.
+
+Lookups of stale handles return `pcapnet.ErrPeerNotFound`; retained metadata is
+historical after its `Done` closes. Full connection IDs remain mandatory even
+when reconnecting clients share an address. See the
+[peer lifecycle guide](../docs/peer-lifecycle.md) for mode distinctions, snapshot
+ownership, cancellation, generation isolation, and callback rules.
+
 ## Protocol
 
 | Profile | Specification and packet diagram |

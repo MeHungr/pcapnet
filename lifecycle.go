@@ -14,10 +14,20 @@ import (
 type managedConn struct {
 	net.Conn // The underlying gVisor TCP connection
 
-	owner *VirtualStack // The stack that owns this connection
+	owner      *VirtualStack // The stack that owns this connection
+	generation *allocation   // Immutable allocation binding for accepted PCAT TCP
 
 	closeOnce sync.Once // Ensures the connection closes once
 	closeErr  error     // Stable result shared by concurrent Close callers
+}
+
+// Peer returns the original allocation's exact peer handle, even after closure.
+// A zero peer denotes a connection outside the PCAT server acceptance path.
+func (c *managedConn) Peer() Peer {
+	if c.generation == nil {
+		return Peer{}
+	}
+	return c.generation.key.endpoint
 }
 
 // Close closes the TCP connection and unregisters it from its VirtualStack.
@@ -84,6 +94,9 @@ func (l *managedListener) Close() error {
 // registerConn registers a TCP connection with the VirtualStack.
 // Connections cannot be registered after shutdown begins.
 func (v *VirtualStack) registerConn(conn net.Conn) (net.Conn, error) {
+	return v.registerGenerationConn(conn, nil)
+}
+func (v *VirtualStack) registerGenerationConn(conn net.Conn, generation *allocation) (net.Conn, error) {
 	// Acquire the lifecycle lock.
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -95,8 +108,7 @@ func (v *VirtualStack) registerConn(conn net.Conn) (net.Conn, error) {
 
 	// Wrap the connection to manage its lifetime.
 	managed := &managedConn{
-		Conn:  conn,
-		owner: v,
+		Conn: conn, owner: v, generation: generation,
 	}
 
 	// Register the connection.
@@ -203,6 +215,11 @@ func (v *VirtualStack) Close() {
 
 		// Release the lock before closing network resources.
 		v.mu.Unlock()
+
+		// Stop generation-aware handshakes before destroying the shared stack.
+		if v.peerListener != nil {
+			_ = v.peerListener.Close()
+		}
 
 		// Close all active TCP listeners.
 		var cleanupErr error

@@ -21,8 +21,9 @@ type VirtualStack struct {
 	Stack *stack.Stack      // The TCP/IP stack
 	Link  *channel.Endpoint // The link layer endpoint
 
-	config Config        // The configuration of the stack
-	bridge *packetBridge // Optional transport and its packet-processing workers
+	config       Config // The configuration of the stack
+	peerListener *peerListener
+	bridge       *packetBridge // Optional transport and its packet-processing workers
 
 	mu        sync.Mutex         // Protects the stack's lifecycle state
 	closing   bool               // Indicates that shutdown has begun

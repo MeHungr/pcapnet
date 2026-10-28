@@ -57,10 +57,14 @@ type allocationKey struct {
 	request  sessionID
 }
 type allocation struct {
-	key   allocationKey
-	token sessionID
-	ip    netip.Addr
-	seen  time.Time
+	key      allocationKey
+	token    sessionID
+	ip       netip.Addr
+	seen     time.Time
+	mark     uint32
+	done     chan struct{}
+	cleaned  chan struct{}
+	peerDone <-chan struct{}
 }
 
 // ServerTransport multiplexes assigned virtual addresses onto a DatagramEndpoint.
@@ -72,10 +76,14 @@ type ServerTransport struct {
 	config    ServerConfig
 	ctx       context.Context
 	cancel    context.CancelFunc
+	injectMu  sync.Mutex // Joins in-flight stack injection before generation cleanup.
 	mu        sync.Mutex // Serializes allocation, expiry, and reply lookup.
 	requests  map[allocationKey]*allocation
 	tokens    map[sessionID]*allocation
 	addresses map[netip.Addr]*allocation
+	marks     map[uint32]*allocation
+	nextMark  uint32
+	retire    func(*allocation)
 	next      netip.Addr
 	incoming  chan sessionPacket
 	workers   sync.WaitGroup
@@ -98,7 +106,7 @@ func NewServerTransport(endpoint DatagramEndpoint, cfg ServerConfig) (*ServerTra
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &ServerTransport{
 		endpoint: endpoint, config: cfg, ctx: ctx, cancel: cancel,
-		requests: make(map[allocationKey]*allocation), tokens: make(map[sessionID]*allocation),
+		marks: make(map[uint32]*allocation), requests: make(map[allocationKey]*allocation), tokens: make(map[sessionID]*allocation),
 		addresses: make(map[netip.Addr]*allocation), next: cfg.AddressPool.Addr().Next(),
 		incoming: make(chan sessionPacket, 256),
 	}
@@ -109,16 +117,10 @@ func NewServerTransport(endpoint DatagramEndpoint, cfg ServerConfig) (*ServerTra
 	return s, nil
 }
 func (s *ServerTransport) expireLocked(now time.Time) {
-	for token, a := range s.tokens {
-		if now.Sub(a.seen) < s.config.IdleTimeout {
-			continue
+	for _, a := range s.tokens {
+		if !a.live() || now.Sub(a.seen) >= s.config.IdleTimeout {
+			s.retireLocked(a)
 		}
-		if s.expire != nil {
-			s.expire(a.ip)
-		}
-		delete(s.tokens, token)
-		delete(s.requests, a.key)
-		delete(s.addresses, a.ip)
 	}
 }
 func (s *ServerTransport) expireLoop() {
@@ -143,12 +145,23 @@ func (s *ServerTransport) allocate(peer Peer, id sessionID, now time.Time) ([]by
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireLocked(now)
+	if s.ctx.Err() != nil {
+		return nil, ErrClosed
+	}
+	var peerDone <-chan struct{}
+	if provider, ok := s.endpoint.(PeerLifecycle); ok {
+		var err error
+		peerDone, err = provider.PeerDone(peer)
+		if err != nil || channelClosed(peerDone) {
+			return sessionMessage(sessionRejected, id, nil), nil
+		}
+	}
 	key := allocationKey{peer, id}
 	if a := s.requests[key]; a != nil {
 		a.seen = now
 		return sessionMessage(sessionAssignment, id, encodeAssignment(Assignment{a.ip, s.config.VirtualIP, s.config.MTU}, a.token, uint32(s.config.IdleTimeout/time.Second))), nil
 	}
-	if len(s.tokens) >= s.config.MaxPeers {
+	if len(s.addresses) >= s.config.MaxPeers || s.nextMark == ^uint32(0) {
 		return sessionMessage(sessionRejected, id, nil), nil
 	}
 	// At most live allocations plus server/network/broadcast need skipping, even
@@ -177,7 +190,13 @@ func (s *ServerTransport) allocate(peer Peer, id sessionID, now time.Time) ([]by
 			break
 		}
 	}
-	a := &allocation{key, token, ip, now}
+	s.nextMark++
+	a := &allocation{key: key, token: token, ip: ip, seen: now, mark: s.nextMark, done: make(chan struct{}), cleaned: make(chan struct{}), peerDone: peerDone}
+	s.marks[a.mark] = a
+	if peerDone != nil {
+		s.workers.Add(1)
+		go s.watchPeer(a)
+	}
 	s.requests[key] = a
 	s.tokens[token] = a
 	s.addresses[ip] = a
@@ -214,7 +233,7 @@ func (s *ServerTransport) readLoop() {
 		}
 		s.mu.Lock()
 		a := s.tokens[id]
-		valid := a != nil && a.key.endpoint == peer && time.Since(a.seen) < s.config.IdleTimeout
+		valid := a != nil && a.live() && a.key.endpoint == peer && time.Since(a.seen) < s.config.IdleTimeout
 		if valid && kind == sessionData {
 			valid = validateInnerIPv4(payload, s.config.MTU) == nil && netip.AddrFrom4([4]byte(payload[12:16])) == a.ip && netip.AddrFrom4([4]byte(payload[16:20])) == s.config.VirtualIP
 		}
@@ -251,7 +270,7 @@ func (s *ServerTransport) Send(ctx context.Context, packet []byte) error {
 	}
 	s.mu.Lock()
 	a := s.addresses[netip.AddrFrom4([4]byte(packet[16:20]))]
-	if a == nil || time.Since(a.seen) >= s.config.IdleTimeout {
+	if a == nil || !a.live() || time.Since(a.seen) >= s.config.IdleTimeout {
 		s.mu.Unlock()
 		return nil
 	}
@@ -264,42 +283,31 @@ func (s *ServerTransport) Send(ctx context.Context, packet []byte) error {
 
 // Receive returns one validated, independently owned inner packet.
 func (s *ServerTransport) Receive(ctx context.Context) ([]byte, error) {
-	if ctx == nil {
-		return nil, fmt.Errorf("packet context is required")
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-s.ctx.Done():
-			return nil, ErrClosed
-		case packet := <-s.incoming:
-			s.mu.Lock()
-			a := s.tokens[packet.token]
-			valid := s.ctx.Err() == nil && a != nil && time.Since(a.seen) < s.config.IdleTimeout
-			s.mu.Unlock()
-			if valid {
-				if ctx.Err() != nil {
-					return nil, ctx.Err()
-				}
-				return packet.data, nil
-			}
-		}
-	}
+	packet, err := s.receiveSessionPacket(ctx)
+	return packet.data, err
 }
 
 // Close cancels workers and releases the owned endpoint exactly once.
 func (s *ServerTransport) Close() error {
 	s.once.Do(func() {
+		s.mu.Lock()
 		s.cancel()
+		s.mu.Unlock()
 		err := s.endpoint.Close()
 		s.workers.Wait()
 		queue.Drain(s.incoming)
 		s.mu.Lock()
+		for _, a := range s.addresses {
+			if !channelClosed(a.done) {
+				close(a.done)
+			}
+		}
+		clear(s.marks)
 		clear(s.tokens)
 		clear(s.addresses)
 		clear(s.requests)
 		s.expire = nil
+		s.retire = nil
 		s.err = errors.Join(s.err, err)
 		s.mu.Unlock()
 	})

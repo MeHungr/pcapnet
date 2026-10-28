@@ -88,6 +88,22 @@ func AllocateClient(ctx context.Context, endpoint DatagramEndpoint, peer Peer, m
 				ctx: life, cancel: stop, incoming: make(chan []byte, 256),
 			}
 			c.workers.Add(2)
+			if lifecycle, ok := endpoint.(PeerLifecycle); ok {
+				done, lookupErr := lifecycle.PeerDone(peer)
+				if lookupErr != nil {
+					stop()
+					return nil, empty, lookupErr
+				}
+				c.workers.Add(1)
+				go func() {
+					defer c.workers.Done()
+					select {
+					case <-c.ctx.Done():
+					case <-done:
+						c.failed(ErrPeerNotFound)
+					}
+				}()
+			}
 			go c.readLoop()
 			go c.keepalive(lease / 3)
 			return c, a, nil

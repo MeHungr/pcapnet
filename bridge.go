@@ -16,6 +16,7 @@ import (
 // packetBridge moves complete IPv4 packets between one gVisor link and one
 // owned transport. Workers share cancellation but process each direction alone.
 type packetBridge struct {
+	lifetime  context.Context
 	link      *channel.Endpoint  // Link owned by the parent VirtualStack
 	transport PacketTransport    // Transport closed with this bridge
 	config    Config             // Normalized virtual address and MTU settings
@@ -37,6 +38,12 @@ type packetBridge struct {
 // A subsequent worker failure shuts down the stack automatically; Err preserves
 // its cause. A transport failing immediately can begin shutdown before return.
 func NewVirtualStackWithTransport(cfg Config, transport PacketTransport) (*VirtualStack, error) {
+	return newVirtualStackWithTransport(cfg, transport, nil)
+}
+
+// configure runs before bridge publication, so server listeners are installed
+// before a packet failure can start stack destruction.
+func newVirtualStackWithTransport(cfg Config, transport PacketTransport, configure func(*VirtualStack)) (*VirtualStack, error) {
 	// Reject typed nil implementations as well as a nil interface before any
 	// methods are invoked or ownership is transferred.
 	if nilPacketTransport(transport) {
@@ -75,6 +82,10 @@ func NewVirtualStackWithTransport(cfg Config, transport PacketTransport) (*Virtu
 		p.mu.Unlock()
 	}
 
+	if configure != nil {
+		configure(v)
+	}
+
 	// All fallible validation is complete. The bridge now owns the transport
 	// and begins moving packets using the stack's lifetime context.
 	// A transport can fail as soon as a worker starts. Hold the owner lock
@@ -110,7 +121,7 @@ func nilInterface(implementation any) bool {
 // A worker failure cancels its sibling, retains its cause, and notifies the owner.
 func startPacketBridge(parent context.Context, link *channel.Endpoint, cfg Config, transport PacketTransport, onFailure func(error)) *packetBridge {
 	ctx, cancel := context.WithCancel(parent)
-	b := &packetBridge{link: link, transport: transport, config: cfg, cancel: cancel, onFailure: onFailure}
+	b := &packetBridge{lifetime: ctx, link: link, transport: transport, config: cfg, cancel: cancel, onFailure: onFailure}
 	b.workers.Add(2)
 	go func() {
 		defer b.workers.Done()
@@ -152,6 +163,12 @@ func (b *packetBridge) egress(ctx context.Context) error {
 			}
 			return fmt.Errorf("bridge link closed unexpectedly: %w", ErrClosed)
 		}
+		if barrier, ok := pkt.Owner.(*egressBarrier); ok {
+			close(barrier.done)
+			pkt.DecRef()
+			continue
+		}
+		mark := pkt.Mark
 		view := pkt.ToView()
 		data := append([]byte(nil), view.AsSlice()...)
 		view.Release()
@@ -160,7 +177,13 @@ func (b *packetBridge) egress(ctx context.Context) error {
 		if !b.validPacket(data, false) {
 			continue
 		}
-		if err := b.transport.Send(ctx, data); err != nil {
+		var err error
+		if server, ok := b.transport.(*ServerTransport); ok {
+			err = server.sendMarked(ctx, data, mark)
+		} else {
+			err = b.transport.Send(ctx, data)
+		}
+		if err != nil {
 			return fmt.Errorf("bridge send: %w", err)
 		}
 	}
@@ -171,7 +194,16 @@ func (b *packetBridge) egress(ctx context.Context) error {
 // while processing after our local packet reference is released.
 func (b *packetBridge) ingress(ctx context.Context) error {
 	for {
-		data, err := b.transport.Receive(ctx)
+		var data []byte
+		var err error
+		var queued sessionPacket
+		server, serverMode := b.transport.(*ServerTransport)
+		if serverMode {
+			queued, err = server.receiveSessionPacket(ctx)
+			data = queued.data
+		} else {
+			data, err = b.transport.Receive(ctx)
+		}
 		if err != nil {
 			return fmt.Errorf("bridge receive: %w", err)
 		}
@@ -182,7 +214,14 @@ func (b *packetBridge) ingress(ctx context.Context) error {
 			continue
 		}
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(data)})
-		b.link.InjectInbound(ipv4.ProtocolNumber, pkt)
+		if serverMode {
+			server.injectGeneration(queued, func(_ []byte, mark uint32) {
+				pkt.Mark = mark
+				b.link.InjectInbound(ipv4.ProtocolNumber, pkt)
+			})
+		} else {
+			b.link.InjectInbound(ipv4.ProtocolNumber, pkt)
+		}
 		pkt.DecRef()
 	}
 }

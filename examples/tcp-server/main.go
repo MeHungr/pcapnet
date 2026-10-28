@@ -106,13 +106,14 @@ func run() (resultErr error) {
 	defer stopClose()
 	fmt.Printf("TCP listening on %s over UDP port %d (Ctrl+C to stop)\n", listener.Addr(), *localPort)
 	for {
-		conn, err := listener.Accept()
+		conn, peer, err := listener.AcceptWithPeer()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
 			return err
 		}
+		fmt.Printf("accepted TCP from %s (connection ID %x)\n", peer.AddrPort, peer.ConnectionID)
 		workers.Add(1)
 		go func() { defer workers.Done(); echo(ctx, conn) }()
 	}

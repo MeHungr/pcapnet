@@ -34,6 +34,14 @@ setup/cleanup error preservation, drained queues, cleared allocations, invalid
 credential rejection before ownership transfer, and canceled blocked sends.
 Jumbo-MTU tests verify the pinned DTLS library's receive-buffer limit.
 
+Peer lifecycle regressions cover multiple TCP connections per peer, secure peers
+sharing a physical tuple, immutable authentication snapshots in server-only/mutual
+modes, raw authentication reporting, selected local certificates, targeted
+revocation, blocked reads/writes, idle-expiry propagation, stale queued accepts,
+forced `/30` virtual-IP reuse, delayed cleanup, cancellable disconnect waits,
+and rejection of dequeued ingress/marked egress from a retired generation.
+These use real DTLS and gVisor over simulated delivery, without capture privileges.
+
 ## Live tests
 
 [Live capture tests](../pcap_live_test.go) require the `pcaplive` build tag and
