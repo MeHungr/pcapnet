@@ -3,6 +3,8 @@ package pcapnet
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -20,7 +22,7 @@ import (
 type UDPConfig struct {
 	DeviceName     string     // Optional capture device; empty selects by route or LocalIP
 	LocalIP        netip.Addr // Required for ListenUDP; DialUDP can use the route source
-	LocalPort      uint16     // Explicit nonzero UDP port; ephemeral allocation is not provided
+	LocalPort      uint16     // Zero in DialUDP selects a dynamic port; reservation remains optional
 	ReserveUDPPort bool       // Optional host socket reservation, default false
 	MTU            uint32     // Physical IPv4 MTU cap; zero uses the interface MTU
 	MagicHeader    []byte     // Optional payload prefix: prepend on write, match and strip on read
@@ -117,7 +119,7 @@ func newUDPConn(ctx context.Context, cfg UDPConfig, peer netip.AddrPort, ops udp
 }
 
 // newUDPConnMode shares setup and resource ownership with the capture server.
-// Only that server uses allPorts; ordinary UDP endpoints still require a port.
+// Only that server uses allPorts; listeners still require an explicit port.
 func newUDPConnMode(ctx context.Context, cfg UDPConfig, peer netip.AddrPort, ops udpSetupOps, allPorts bool) (_ *UDPConn, resultErr error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("UDP setup context cannot be nil")
@@ -128,7 +130,7 @@ func newUDPConnMode(ctx context.Context, cfg UDPConfig, peer netip.AddrPort, ops
 	if cfg.DeviceName != "" && strings.TrimSpace(cfg.DeviceName) == "" {
 		return nil, fmt.Errorf("capture device name cannot contain only whitespace")
 	}
-	if cfg.LocalPort == 0 && !allPorts {
+	if cfg.LocalPort == 0 && !allPorts && !peer.IsValid() {
 		return nil, fmt.Errorf("nonzero local UDP port is required")
 	}
 	connected := peer.IsValid()
@@ -194,12 +196,38 @@ func newUDPConnMode(ctx context.Context, cfg UDPConfig, peer netip.AddrPort, ops
 			resultErr = errors.Join(resultErr, r.Close())
 		}
 	}()
+	if cfg.LocalPort == 0 && connected && !cfg.ReserveUDPPort {
+		// Select from the dynamic/private range without opening a host socket.
+		// This does not establish exclusive ownership of the selected port.
+		var random [2]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return nil, fmt.Errorf("select dynamic UDP port: %w", err)
+		}
+		cfg.LocalPort = 49152 + binary.BigEndian.Uint16(random[:])%16384
+		r.local = netip.AddrPortFrom(cfg.LocalIP, cfg.LocalPort)
+	}
 	if cfg.ReserveUDPPort {
 		port, err := ops.reservePort(ctx, r.local)
 		if err != nil {
 			return nil, fmt.Errorf("reserve UDP port: %w", err)
 		}
 		r.port = port
+		if cfg.LocalPort == 0 {
+			bound, ok := port.(interface{ LocalAddr() net.Addr })
+			if !ok {
+				return nil, fmt.Errorf("UDP reservation does not expose its local address")
+			}
+			address, ok := bound.LocalAddr().(*net.UDPAddr)
+			if !ok || address == nil {
+				return nil, fmt.Errorf("UDP reservation has an invalid local address")
+			}
+			actual := address.AddrPort()
+			if actual.Addr() != cfg.LocalIP || actual.Port() == 0 {
+				return nil, fmt.Errorf("UDP reservation did not allocate the requested source address")
+			}
+			cfg.LocalPort = actual.Port()
+			r.local = actual
+		}
 	}
 	handle, err := ops.openCapture(device.Name, captureSnaplen, false, captureTimeout)
 	if err != nil {

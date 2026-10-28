@@ -96,7 +96,17 @@ servers also support `-reserve-port`.
 `Config` supplies `VirtualIP`, `PeerSubnet` (`netip.Prefix`), and inner `MTU`.
 `ServerConfig` controls the address pool, server IP, MTU, lease timeout, and peer
 limit. `UDPConfig` describes the physical endpoint; listeners require `LocalIP`
-and a nonzero port. Direct UDP does not allocate ephemeral ports.
+and a nonzero port. For clients, `DialUDP` (including `DialPCAPStack`) accepts
+`LocalPort: 0` to select a dynamic source port on the route-selected IPv4
+address. With `ReserveUDPPort: false` (the default), selection is random in
+49152–65535 and opens no host socket. The port is not checked for availability
+or exclusively owned; another endpoint or host application can use it.
+With `ReserveUDPPort: true`, the OS allocates an ephemeral port and the endpoint
+retains the reservation socket until closure. Packet I/O still uses PCAP.
+`LocalAddr`, capture filters, and injected packets use the selected port.
+Failed setup releases any reservation. Explicit nonzero ports retain their
+existing optional reservation behavior. The lower-level `PCAPConfig` API still
+requires a nonzero port.
 
 Set `UDPConfig.MagicHeader` to prepend a binary prefix on `Write`/`WriteTo` and
 match/remove it on `Read`/`ReadFrom`. Empty means ordinary UDP. Both endpoints

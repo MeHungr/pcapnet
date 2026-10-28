@@ -309,7 +309,7 @@ func TestDirectUDPSetup(t *testing.T) {
 		connected bool
 	}{
 		{"no listener IP", func(f *udpFixture) { f.config.LocalIP = netip.Addr{} }, false},
-		{"missing port", func(f *udpFixture) { f.config.LocalPort = 0 }, true},
+		{"missing listener port", func(f *udpFixture) { f.config.LocalPort = 0 }, false},
 		{"wrong source", func(f *udpFixture) { f.config.LocalIP = netip.MustParseAddr("192.0.2.3") }, true},
 		{"MTU too large", func(f *udpFixture) { f.config.MTU = 1501 }, true},
 		{"wrong capture type", func(f *udpFixture) { f.capture.link = layers.LinkTypeRaw }, true},
